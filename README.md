@@ -209,7 +209,7 @@ The defaults are designed for local use: the service starts at port `9080`. If t
 | `resourceOperationTimeoutMs` | `120000` | Overall timeout for one resource-library tool operation |
 | `tools` | `true` | Enable agent editing capabilities |
 | `skills` | `true` | Enable bundled task guidance |
-| `imageApiKey` | `ARK_API_KEY` | Volcengine Ark API key for image editing; `univer_image_edit` stays available without one and answers `IMAGE_API_KEY_MISSING` |
+| `imageApiKey` | `ARK_API_KEY` | Volcengine Ark API key for image editing. Enter it on the `univer` row of the `dsh-univer-office` plugin page; the next edit uses the saved value. An empty field still falls through to `ARK_API_KEY`. `univer_image_edit` stays available without either and answers `IMAGE_API_KEY_MISSING` |
 | `imageModel` | `doubao-seedream-5-0-pro-260628` | Image model the Ark account must have activated |
 | `imageEndpoint` | Ark `images/generations` URL | Absolute HTTP(S) image generation endpoint |
 | `imageSize` | `1K` | Requested output size class: `1K`, `2K`, or `4K` |

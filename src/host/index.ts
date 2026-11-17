@@ -1,4 +1,5 @@
 import type { Context } from '@deepseek-ai/cordis'
+import type {} from '@deepseek-ai/dsh-settings'
 import { resolveConfig } from './config.ts'
 import type { Config as UniverConfig } from './config.ts'
 import * as provider from './provider/plugin.ts'
@@ -45,4 +46,12 @@ export function apply(ctx: Context, config: UniverConfig = {}): void {
   ctx.plugin(prompt)
   if (resolved.tools) ctx.plugin(tools, resolved)
   if (resolved.skills) ctx.plugin(skills)
+  // The image-key field has its own page on the plugin row, so Settings must not
+  // also invent a generated form for this entry.
+  ctx.inject(['settings'], (settingsCtx) => {
+    settingsCtx.effect(
+      () => settingsCtx.settings.configure({ auto: false }, ctx.fiber),
+      'univer: settings page'
+    )
+  })
 }

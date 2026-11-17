@@ -524,10 +524,10 @@ export class GatewayUniverService extends UniverService {
     signal?: AbortSignal
   ): Promise<UniverOperationResult> {
     await assertAuthorizedPath(request.workspace, request.file, true)
-    const apiKey = this.config.imageApiKey
+    const apiKey = this.config.readImageApiKey()
     if (apiKey === undefined) {
       throw new UniverError(
-        'Image editing needs a Volcengine Ark API key: set imageApiKey or ARK_API_KEY.',
+        'Image editing needs a Volcengine Ark API key. Enter it in the dsh-univer-office plugin details, or set imageApiKey or ARK_API_KEY.',
         'IMAGE_API_KEY_MISSING'
       )
     }

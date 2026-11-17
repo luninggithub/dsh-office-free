@@ -48,7 +48,18 @@ export const zh = {
   'viewer.missing': '该文件已不在当前会话的工作区中',
   'viewer.presentationOpening': '正在将演示文稿导入 Univer…',
   'viewer.presentationFailed': '无法在 Univer 中打开该演示文稿',
-  'viewer.retry': '重试'
+  'viewer.retry': '重试',
+  'plugin.apiKeySummary': '填写火山方舟 API Key 后，可以编辑幻灯片中的图片',
+  'plugin.apiKeyLabel': '火山方舟 API Key',
+  'plugin.apiKeyHint': '用于 univer_image_edit。留空保存不会改掉已经填过的 Key。',
+  'plugin.apiKeySet': '已填写',
+  'plugin.apiKeyUnset': '未填写',
+  'plugin.apiKeySave': '保存',
+  'plugin.apiKeyClear': '清除',
+  'plugin.apiKeySaving': '保存中…',
+  'plugin.apiKeySaved': '已保存',
+  'plugin.apiKeyFailed': '没能保存，请再试一次',
+  'plugin.apiKeyUnavailable': '当前无法修改 API Key'
 } as const
 
 /** Translation keys owned by the Univer browser surfaces. */

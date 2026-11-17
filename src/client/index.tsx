@@ -1,5 +1,7 @@
 import type { Context as ClientContext } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/dsh-client-locale/client'
+import type {} from '@deepseek-ai/dsh-client-ui-plugin-manager/client'
+import type {} from '@deepseek-ai/dsh-client-ui-settings/client'
 import type { ConversationNodeDefinition } from '@deepseek-ai/dsh-client-ui-conversation/client'
 import type {} from '@deepseek-ai/dsh-client-ui-plugin-manager/client'
 import type {} from '@deepseek-ai/dsh-client-ui-renderer/client'
@@ -11,6 +13,7 @@ import {
   UNIVER_SIDEBAR_TAB_KIND,
   UniverSidebarTabBody
 } from './components/univer-sidebar-tab.tsx'
+import { ImageApiKeyForm } from './components/image-api-key-form.tsx'
 import { UniverDock } from './components/univer-dock.tsx'
 import { univerTurnDefinition } from './conversation/univer-turn-definition.ts'
 import { en, UNIVER_LOCALE_NAMESPACE, zh } from './locales/index.ts'
@@ -92,6 +95,39 @@ export function apply(ctx: ClientContext): void {
   ctx.inject(['betterSidebar'], (sidebarCtx: ClientContext) => {
     sidebarCtx.effect(() => registerUniverFileViewer(sidebarCtx), 'univer: univer file viewer')
   })
+  ctx.inject(['configForms'], (formCtx: ClientContext) => {
+    formCtx.effect(
+      () =>
+        formCtx.configForms.whileServed([IMAGE_API_KEY_ENTRY], () =>
+          formCtx.slots.inject('plugins.row.config', () =>
+            formCtx.slots.register(
+              {
+                name: 'plugins.row.config',
+                key: `dsh-univer-office#${IMAGE_API_KEY_ENTRY}`,
+                locale: UNIVER_LOCALE_NAMESPACE,
+                inject: () => ({ apiKeyConfigured: imageApiKeyConfigured(formCtx) })
+              },
+              ImageApiKeyForm
+            )
+          )
+        ),
+      'univer: image api key'
+    )
+  })
+}
+
+/** Profile entry id declared by this package's bundle patch. Settings uses the same id. */
+const IMAGE_API_KEY_ENTRY = 'univer'
+
+function imageApiKeyConfigured(ctx: ClientContext): boolean {
+  const namespaces = ctx.configForms.describe().getSnapshot().view?.namespaces
+  const entry = namespaces?.find((item) => item.ns === IMAGE_API_KEY_ENTRY)
+  return (
+    entry?.secrets.some(
+      (secret: { readonly path: readonly string[]; readonly set: boolean }) =>
+        secret.path.length === 1 && secret.path[0] === 'imageApiKey' && secret.set
+    ) === true
+  )
 }
 
 /**

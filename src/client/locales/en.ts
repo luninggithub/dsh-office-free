@@ -50,5 +50,17 @@ export const en = {
   'viewer.missing': 'This file is no longer in the current session workspace',
   'viewer.presentationOpening': 'Importing this presentation into Univer…',
   'viewer.presentationFailed': 'This presentation could not be opened in Univer',
-  'viewer.retry': 'Try again'
+  'viewer.retry': 'Try again',
+  'plugin.apiKeySummary': 'Add a Volcengine Ark API key to edit pictures in a slide',
+  'plugin.apiKeyLabel': 'Volcengine Ark API key',
+  'plugin.apiKeyHint':
+    'Used by univer_image_edit. Saving a blank field leaves the stored key unchanged.',
+  'plugin.apiKeySet': 'Saved',
+  'plugin.apiKeyUnset': 'Not set',
+  'plugin.apiKeySave': 'Save',
+  'plugin.apiKeyClear': 'Clear',
+  'plugin.apiKeySaving': 'Saving…',
+  'plugin.apiKeySaved': 'Saved',
+  'plugin.apiKeyFailed': 'Could not save. Try again.',
+  'plugin.apiKeyUnavailable': 'The API key cannot be changed right now'
 } satisfies Record<UniverLocaleKey, string>

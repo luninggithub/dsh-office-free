@@ -40,6 +40,12 @@ import { measureSlideImage } from './image-screen-rect.ts'
 import { selectedSlideImage } from './panel-selection.ts'
 
 const GREEN = '#16a34a'
+const PRIMARY = '#14A6EA'
+const INK = '#00141A'
+const LINE = 'rgba(0, 20, 26, 0.08)'
+const BUBBLE_SHADOW =
+  '0px 9px 28px 8px rgba(0, 20, 26, 0.05), 0px 6px 16px 0px rgba(0, 0, 0, 0.08), 0px 3px 6px -4px rgba(0, 0, 0, 0.12)'
+const INPUT_WIDTH = 280
 const FOLLOW_SELECTION_MS = 200
 
 interface Copy {
@@ -640,7 +646,7 @@ function ImageRegionEditor({
         session !== null &&
         session.regions.map((region, index) => {
           const box = regionFrame(region, rect)
-          const input = placeInput(box)
+          const input = placeInput(box, rect)
           const selected = region.id === session.selectedId
           return (
             <div
@@ -648,7 +654,8 @@ function ImageRegionEditor({
               style={inputStyle(input, selected, 40 + index)}
               onPointerDown={(event) => event.stopPropagation()}
             >
-              <span style={badgeStyle}>{index + 1}</span>
+              {selected && <Caret above={input.above} />}
+              <span style={badgeStyle(selected)}>{index + 1}</span>
               <textarea
                 data-region-id={region.id}
                 value={region.text}
@@ -676,7 +683,7 @@ function ImageRegionEditor({
                   style={deleteStyle}
                   onClick={() => removeRegion(region.id)}
                 >
-                  ×
+                  <TrashIcon />
                 </button>
               )}
             </div>
@@ -693,14 +700,18 @@ function ImageRegionEditor({
         </button>
       )}
       {editing && session !== null && (
-        <div data-image-region-bar="true" style={barStyle}>
+        <div
+          data-image-region-bar="true"
+          style={rect === null ? viewportBarStyle : imageDockStyle(placeButton(rect))}
+        >
           <button
             type="button"
             data-image-region-action="back"
-            style={quietButtonStyle}
+            aria-label={copy.back}
+            style={backButtonStyle}
             onClick={onBack}
           >
-            {copy.back}
+            <BackIcon />
           </button>
           <span style={hintStyle}>{copy.hint}</span>
           <button
@@ -716,7 +727,7 @@ function ImageRegionEditor({
         </div>
       )}
       {generating && (
-        <div data-image-region-bar="true" style={barStyle}>
+        <div data-image-region-bar="true" style={viewportBarStyle}>
           <span style={spinnerStyle} />
           <span style={generatingTextStyle}>
             {copy.generating}
@@ -768,7 +779,7 @@ const COPY: Record<'zh' | 'en', Copy> = {
     edit: '编辑区域',
     back: '返回',
     hint: '拖拽或点击添加区域',
-    apply: (count) => `全部应用(${count})`,
+    apply: (count) => `全部应用 (${count})`,
     placeholder: '描述要进行的修改…',
     generating: '正在编辑图片…',
     stop: '停止',
@@ -881,7 +892,7 @@ function capture(element: HTMLElement, pointerId: number): void {
 
 function fitTextarea(node: HTMLTextAreaElement): void {
   node.style.height = 'auto'
-  node.style.height = `${Math.min(node.scrollHeight, 60)}px`
+  node.style.height = `${Math.min(node.scrollHeight, 72)}px`
 }
 
 function sameRect(current: PixelRect | null, next: PixelRect | null): boolean {
@@ -905,12 +916,18 @@ function placeButton(rect: PixelRect): { left: number; top: number } {
   return { left: rect.left + rect.width / 2, top: rect.top + rect.height + 4 }
 }
 
-function placeInput(box: PixelRect): { left: number; top: number; width: number } {
-  const width = Math.min(280, Math.max(180, window.innerWidth - 16))
-  const left = Math.min(Math.max(8, box.left), Math.max(8, window.innerWidth - width - 8))
+function placeInput(
+  box: PixelRect,
+  image: PixelRect
+): { left: number; top: number; width: number; above: boolean } {
+  const left = Math.min(Math.max(8, box.left), Math.max(8, window.innerWidth - INPUT_WIDTH - 8))
   const below = box.top + box.height + 8
-  const top = below + 44 <= window.innerHeight - 72 ? below : Math.max(8, box.top - 52)
-  return { left, top, width }
+  // The edit dock occupies the strip under the image, so a bubble that would land there sits
+  // above its region instead.
+  const dockTop = image.top + image.height + 4
+  const above = below + 44 > dockTop && box.top > 56
+  const top = above ? Math.max(8, box.top - 52) : below
+  return { left, top, width: INPUT_WIDTH, above }
 }
 
 function frameStyle(rect: PixelRect): CSSProperties {
@@ -986,37 +1003,91 @@ function inputStyle(
     top: input.top,
     width: input.width,
     display: 'flex',
-    alignItems: 'flex-start',
-    gap: 8,
-    padding: '6px 8px',
+    alignItems: 'center',
+    gap: 4,
+    padding: 8,
     background: '#fff',
-    border: `1px solid ${selected ? GREEN : '#e5e5e5'}`,
-    borderRadius: 8,
-    boxShadow: '0 8px 24px rgba(0, 0, 0, 0.12)',
+    border: `1px solid ${selected ? PRIMARY : LINE}`,
+    borderRadius: 12,
+    boxShadow: selected ? BUBBLE_SHADOW : 'none',
     pointerEvents: 'auto',
     zIndex,
-    boxSizing: 'border-box',
-    fontSize: 13,
-    lineHeight: '20px'
+    boxSizing: 'border-box'
+  }
+}
+
+function Caret(props: { readonly above: boolean }): ReactElement {
+  return (
+    <>
+      <span style={caretStyle(props.above, false)} />
+      <span style={caretStyle(props.above, true)} />
+    </>
+  )
+}
+
+function caretStyle(above: boolean, fill: boolean): CSSProperties {
+  const shared: CSSProperties = {
+    position: 'absolute',
+    left: '50%',
+    width: 0,
+    height: 0,
+    transform: 'translateX(-50%)',
+    pointerEvents: 'none'
+  }
+  const size = fill ? 7 : 8
+  const edge = `${size}px solid transparent`
+  const color = fill ? '#fff' : PRIMARY
+  if (above) {
+    return {
+      ...shared,
+      bottom: fill ? -6 : -8,
+      borderLeft: edge,
+      borderRight: edge,
+      borderTop: `${size}px solid ${color}`
+    }
+  }
+  return {
+    ...shared,
+    top: fill ? -6 : -8,
+    borderLeft: edge,
+    borderRight: edge,
+    borderBottom: `${size}px solid ${color}`
   }
 }
 
 function editButtonStyle(at: { left: number; top: number }): CSSProperties {
   return {
+    ...imageDockStyle(at),
+    height: 44,
+    padding: '8px 16px',
+    color: 'rgba(0, 20, 26, 0.85)',
+    fontSize: 14,
+    lineHeight: '22px',
+    fontWeight: 400,
+    cursor: 'pointer',
+    zIndex: 5
+  }
+}
+
+function imageDockStyle(at: { left: number; top: number }): CSSProperties {
+  return {
     position: 'fixed',
     left: at.left,
     top: at.top,
     transform: 'translateX(-50%)',
-    height: 32,
-    padding: '0 12px',
-    borderRadius: 8,
-    border: `1px solid ${GREEN}`,
+    display: 'flex',
+    alignItems: 'center',
+    gap: 8,
+    maxWidth: 'calc(100% - 16px)',
+    height: 44,
+    padding: '0 8px',
+    boxSizing: 'border-box',
     background: '#fff',
-    color: '#15803d',
-    font: '13px/32px inherit',
-    cursor: 'pointer',
+    border: `1px solid ${LINE}`,
+    borderRadius: 8,
+    boxShadow: BUBBLE_SHADOW,
     pointerEvents: 'auto',
-    zIndex: 5,
+    zIndex: 80,
     whiteSpace: 'nowrap'
   }
 }
@@ -1057,7 +1128,7 @@ function blurFrameStyle(rect: PixelRect): CSSProperties {
   }
 }
 
-const barStyle: CSSProperties = {
+const viewportBarStyle: CSSProperties = {
   position: 'fixed',
   left: '50%',
   bottom: 16,
@@ -1068,11 +1139,26 @@ const barStyle: CSSProperties = {
   maxWidth: 'calc(100% - 24px)',
   padding: '8px 12px',
   background: '#fff',
-  border: '1px solid #e5e5e5',
-  borderRadius: 12,
-  boxShadow: '0 8px 24px rgba(0, 0, 0, 0.12)',
+  border: `1px solid ${LINE}`,
+  borderRadius: 8,
+  boxShadow: BUBBLE_SHADOW,
   pointerEvents: 'auto',
   zIndex: 80
+}
+
+const backButtonStyle: CSSProperties = {
+  width: 24,
+  height: 24,
+  display: 'flex',
+  alignItems: 'center',
+  justifyContent: 'center',
+  padding: 0,
+  border: 'none',
+  borderRadius: 4,
+  background: 'rgba(0, 20, 26, 0.02)',
+  color: 'rgba(0, 20, 26, 0.6)',
+  cursor: 'pointer',
+  flexShrink: 0
 }
 
 const quietButtonStyle: CSSProperties = {
@@ -1088,15 +1174,18 @@ const quietButtonStyle: CSSProperties = {
 
 function applyButtonStyle(enabled: boolean): CSSProperties {
   return {
-    height: 32,
-    padding: '0 12px',
-    borderRadius: 8,
+    height: 28,
+    padding: '4px 12px',
+    borderRadius: 16,
     border: 'none',
-    background: GREEN,
+    background: INK,
     color: '#fff',
-    font: '13px/32px inherit',
+    fontSize: 12,
+    lineHeight: '20px',
+    fontWeight: 500,
     cursor: enabled ? 'pointer' : 'default',
-    opacity: enabled ? 1 : 0.45
+    opacity: enabled ? 1 : 0.45,
+    flexShrink: 0
   }
 }
 
@@ -1108,21 +1197,26 @@ const dangerButtonStyle: CSSProperties = {
 }
 
 const hintStyle: CSSProperties = {
-  color: '#737373',
-  fontSize: 13,
+  color: 'rgba(0, 20, 26, 0.45)',
+  fontSize: 12,
+  lineHeight: '20px',
+  fontWeight: 400,
   whiteSpace: 'nowrap'
 }
 
-const badgeStyle: CSSProperties = {
-  width: 20,
-  height: 20,
-  borderRadius: 999,
-  background: GREEN,
-  color: '#fff',
-  fontSize: 12,
-  lineHeight: '20px',
-  textAlign: 'center',
-  flexShrink: 0
+function badgeStyle(selected: boolean): CSSProperties {
+  return {
+    width: 20,
+    height: 20,
+    borderRadius: 8,
+    background: selected ? INK : 'rgba(0, 20, 26, 0.45)',
+    color: '#fff',
+    fontSize: 12,
+    lineHeight: '20px',
+    fontWeight: 500,
+    textAlign: 'center',
+    flexShrink: 0
+  }
 }
 
 const textareaStyle: CSSProperties = {
@@ -1131,27 +1225,62 @@ const textareaStyle: CSSProperties = {
   border: 'none',
   outline: 'none',
   resize: 'none',
-  padding: 0,
+  padding: '0 8px 0 2px',
   margin: 0,
-  fontSize: 13,
-  lineHeight: '20px',
+  fontSize: 14,
+  lineHeight: '24px',
+  fontWeight: 400,
   fontFamily: 'inherit',
-  color: '#171717',
+  color: INK,
   background: 'transparent',
-  maxHeight: 60,
+  maxHeight: 72,
   overflow: 'auto'
 }
 
 const deleteStyle: CSSProperties = {
-  width: 20,
-  height: 20,
+  width: 24,
+  height: 24,
+  display: 'flex',
+  alignItems: 'center',
+  justifyContent: 'center',
   border: 'none',
+  borderRadius: 6,
   background: 'transparent',
-  color: '#737373',
+  color: INK,
+  opacity: 0.5,
   cursor: 'pointer',
-  fontSize: 16,
-  lineHeight: '18px',
-  padding: 0
+  padding: 0,
+  flexShrink: 0
+}
+
+function BackIcon(): ReactElement {
+  return (
+    <svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true">
+      <path
+        d="M10.2 3.2 5.4 8l4.8 4.8"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.5"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
+  )
+}
+
+function TrashIcon(): ReactElement {
+  return (
+    <svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true">
+      <path
+        d="M3.2 4.4h9.6M6.2 4.4V3.2h3.6v1.2M4.4 4.4l.6 8.2h5.9l.6-8.2"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.2"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
+  )
 }
 
 const generatingTextStyle: CSSProperties = {

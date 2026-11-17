@@ -1,3 +1,4 @@
+import type { Volatile } from '@deepseek-ai/cordis'
 import { isAbsolute, join, resolve } from 'node:path'
 import z from '@deepseek-ai/schemastery'
 import { resolveDshHome } from './dsh-home.ts'
@@ -73,7 +74,7 @@ export interface Config {
   /** Output size requested from the image model. */
   imageSize?: ImageOutputSize
   /** Ark API key; `ARK_API_KEY` in the environment is used when this is unset. */
-  imageApiKey?: string
+  imageApiKey?: string | Volatile<string | undefined>
   /** Absolute HTTP(S) image generation endpoint; defaults to the Volcengine Ark route. */
   imageEndpoint?: string
   /**
@@ -109,13 +110,17 @@ export interface ResolvedConfig {
   readonly telemetry: boolean
   readonly imageModel: string
   readonly imageSize: ImageOutputSize
-  readonly imageApiKey?: string
+  /** The key for the next image edit: the live profile value, then `ARK_API_KEY`. */
+  readonly readImageApiKey: () => string | undefined
   readonly imageEndpoint: string
   readonly imageOperationTimeoutMs: number
 }
 
-/** Cordis configuration schema. */
-export const Config: z<Config> = z.object({
+/**
+ * Cordis configuration schema. The image key is a volatile secret, so its runtime value is read
+ * live and this schema is not forced onto the plain input interface.
+ */
+export const Config = z.object({
   gatewayPort: z.natural().max(65535).default(9080),
   autoStartGateway: z.boolean().default(true),
   gatewayStartupTimeoutMs: z.natural().default(10_000),
@@ -140,7 +145,7 @@ export const Config: z<Config> = z.object({
   telemetry: z.boolean().default(true),
   imageModel: z.string(),
   imageSize: z.union(IMAGE_OUTPUT_SIZES),
-  imageApiKey: z.string(),
+  imageApiKey: z.string().role('secret').volatile(),
   imageEndpoint: z.string(),
   imageOperationTimeoutMs: z.natural().default(180_000)
 })
@@ -148,7 +153,6 @@ export const Config: z<Config> = z.object({
 /** Apply defaults and reject configuration that cannot run. */
 export function resolveConfig(config: Config = {}): ResolvedConfig {
   const browserExecutablePath = resolveBrowserExecutablePath(config.browserExecutablePath)
-  const imageApiKey = resolveImageApiKey(config.imageApiKey)
   const resolved: ResolvedConfig = {
     gatewayPort: config.gatewayPort ?? 9080,
     autoStartGateway: config.autoStartGateway ?? true,
@@ -174,7 +178,7 @@ export function resolveConfig(config: Config = {}): ResolvedConfig {
     telemetry: config.telemetry ?? true,
     imageModel: resolveImageModel(config.imageModel),
     imageSize: resolveImageSize(config.imageSize),
-    ...(imageApiKey === undefined ? {} : { imageApiKey }),
+    readImageApiKey: () => resolveImageApiKey(currentImageApiKey(config.imageApiKey)),
     imageEndpoint: resolveImageEndpoint(config.imageEndpoint),
     imageOperationTimeoutMs: config.imageOperationTimeoutMs ?? 180_000
   }
@@ -244,6 +248,16 @@ function resolveImageSize(configured: string | undefined): ImageOutputSize {
   const size = (configured ?? '1K').trim().toUpperCase()
   if (size === '1K' || size === '2K' || size === '4K') return size
   throw new Error('univer: imageSize must be one of 1K, 2K, or 4K')
+}
+
+/** A schema-wrapped key stays live; tests and direct callers may still pass the string. */
+function currentImageApiKey(
+  configured: string | Volatile<string | undefined> | undefined
+): string | undefined {
+  if (typeof configured === 'object' && configured !== null && 'get' in configured) {
+    return configured.get()
+  }
+  return configured
 }
 
 /** Blank means "unset", so an empty environment variable cannot masquerade as a key. */

@@ -198,7 +198,8 @@ return { pageId: slide.getId(), elementId: image.getId() };`
       await page.click('[data-image-region-action="edit"]')
       await page.waitForSelector('[data-image-region]')
       const marked = await readChrome(page)
-      expect(marked.fontSize).toBe('13px')
+      expect(marked.fontSize).toBe('14px')
+      expectDocked(await dockPlacement(page))
 
       const markedWidth = await frameWidth(page)
       expect(await setZoom(page, unitId, 0.25)).toBe('zoomed')
@@ -211,6 +212,7 @@ return { pageId: slide.getId(), elementId: image.getId() };`
         markedWidth
       )
       expectChromeStable(marked, await readChrome(page))
+      expectDocked(await dockPlacement(page))
 
       const beforeWheel = await frameWidth(page)
       await page.evaluate(() => {
@@ -232,6 +234,7 @@ return { pageId: slide.getId(), elementId: image.getId() };`
         beforeWheel
       )
       expectChromeStable(marked, await readChrome(page))
+      expectDocked(await dockPlacement(page))
     } finally {
       await page.close()
     }
@@ -255,6 +258,11 @@ interface Chrome {
   readonly inputWidth: number
 }
 
+function expectDocked(placement: { gap: number; centerDelta: number }): void {
+  expect(Math.abs(placement.gap - 4)).toBeLessThan(1.5)
+  expect(Math.abs(placement.centerDelta)).toBeLessThan(2)
+}
+
 function expectAligned(alignment: Alignment): void {
   expect(alignment.painted).not.toBeNull()
   expect(Math.abs(alignment.deltaLeft ?? 99)).toBeLessThan(6)
@@ -268,7 +276,7 @@ function expectChromeStable(before: Chrome, after: Chrome): void {
   expect(Math.abs(after.ratioY - before.ratioY)).toBeLessThan(0.02)
   expect(Math.abs(after.ratioW - before.ratioW)).toBeLessThan(0.02)
   expect(Math.abs(after.ratioH - before.ratioH)).toBeLessThan(0.02)
-  expect(after.fontSize).toBe('13px')
+  expect(after.fontSize).toBe('14px')
   expect(Math.abs(after.inputWidth - before.inputWidth)).toBeLessThan(1)
 }
 
@@ -298,6 +306,18 @@ async function buttonPlacement(page: Page): Promise<{
       centerDelta: button.left + button.width / 2 - (frame.left + frame.width / 2),
       top: button.top,
       frameTop: frame.top
+    }
+  })
+}
+
+async function dockPlacement(page: Page): Promise<{ gap: number; centerDelta: number }> {
+  return page.evaluate(() => {
+    const frame = document.querySelector('[data-image-region-frame]')?.getBoundingClientRect()
+    const bar = document.querySelector('[data-image-region-bar]')?.getBoundingClientRect()
+    if (frame === undefined || bar === undefined) return { gap: 99, centerDelta: 99 }
+    return {
+      gap: bar.top - frame.bottom,
+      centerDelta: bar.left + bar.width / 2 - (frame.left + frame.width / 2)
     }
   })
 }

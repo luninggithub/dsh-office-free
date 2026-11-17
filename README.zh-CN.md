@@ -211,7 +211,7 @@ DSH 会自动选择这些工具，日常使用不需要手动调用。
 | `resourceOperationTimeoutMs` | `120000` | 一次资源库工具操作的总超时 |
 | `tools` | `true` | 启用 Agent 编辑能力 |
 | `skills` | `true` | 启用内置任务指引 |
-| `imageApiKey` | `ARK_API_KEY` | 图片编辑使用的火山方舟 API Key；未设置时 `univer_image_edit` 仍然可用，调用返回 `IMAGE_API_KEY_MISSING` |
+| `imageApiKey` | `ARK_API_KEY` | 图片编辑使用的火山方舟 API Key。在插件列表打开 `dsh-univer-office` 的 `univer` 配置页即可填写，保存后下一次编辑即生效；留空时仍使用 `ARK_API_KEY`。两者都没有时 `univer_image_edit` 仍然可用，调用返回 `IMAGE_API_KEY_MISSING` |
 | `imageModel` | `doubao-seedream-5-0-pro-260628` | 图片模型；方舟账号需已开通该模型 |
 | `imageEndpoint` | 方舟 `images/generations` 地址 | 图片生成接口的绝对 HTTP(S) 地址 |
 | `imageSize` | `1K` | 请求的输出尺寸档位：`1K`、`2K` 或 `4K` |
