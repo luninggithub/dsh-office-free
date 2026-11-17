@@ -2,6 +2,7 @@ import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { Context } from '@deepseek-ai/cordis'
 import { unitId, worktreeId } from '../../service/identifiers.ts'
 import { operationOutput, operationTitle } from '../presentation.ts'
+import { assertSameOpenPresentation } from '../open-presentation.ts'
 import { existingToolFile, existingToolPath } from '../workspace.ts'
 
 /** Create the `univer_compile_svg` tool definition. */
@@ -44,6 +45,7 @@ export function compileSvgTool(ctx: Context, timeoutMs: number) {
         existingToolFile(exec, args.file),
         existingToolPath(exec, args.source)
       ])
+      assertSameOpenPresentation(ctx, exec, target.path)
       return ctx.univer.compileSvg(
         {
           workspace: target.workspace,

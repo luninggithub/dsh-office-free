@@ -17,6 +17,7 @@ export type UniverOperationName =
   | 'screenshot'
   | 'print-pdf'
   | 'compile-svg'
+  | 'image-edit'
 export type UniverOperationPhase = 'pending' | 'succeeded' | 'failed'
 export type UniverTurnLifecycle = 'trunk' | 'draft' | 'merged' | 'discarded' | 'unchanged'
 
@@ -297,7 +298,9 @@ function structuredResult(
   data: SessionEvent<'tool/result'>['data']
 ): Record<string, unknown> | null {
   const text = resultTextBlocks(data)
-    .flatMap((block) => (block.type === 'text' && typeof block.text === 'string' ? [block.text] : []))
+    .flatMap((block) =>
+      block.type === 'text' && typeof block.text === 'string' ? [block.text] : []
+    )
     .join('\n')
   const firstBrace = text.indexOf('{')
   return firstBrace === -1 ? null : parseRecord(text.slice(firstBrace))
@@ -318,7 +321,8 @@ function operationName(name: string): UniverOperationName | null {
     operation === 'lint' ||
     operation === 'screenshot' ||
     operation === 'print-pdf' ||
-    operation === 'compile-svg'
+    operation === 'compile-svg' ||
+    operation === 'image-edit'
   )
     return operation
   return null
@@ -329,7 +333,8 @@ function isWrite(operation: UniverTurnOperation): boolean {
     operation.name === 'execute' ||
     operation.name === 'import' ||
     operation.name === 'unit' ||
-    operation.name === 'compile-svg'
+    operation.name === 'compile-svg' ||
+    operation.name === 'image-edit'
   )
 }
 

@@ -31,7 +31,7 @@
 - 在 DSH 内以 Viewer 全屏预览文件；
 - 在 DSH 文件树中点击 `.univer` 文件即可按需打开 Viewer 预览，不需要任何 Agent 操作，也不要求安装 `dsh-better-sidebar`；预览只跟随该文件唯一的一条改动分支，不提供版本切换；
 - 点击聊天记录里的 `.pptx`（或文件树中的 `.pptx`）时，把该文稿导入同目录 `.univer` 容器，并在同一页面右侧的预览页中打开：宿主提供 `sidebarRightTabs` 时用原生右栏标签页，装了 `dsh-better-sidebar` 时用它的文件预览器，两者都缺席时由插件自己的 `conversation.input.dock` 停靠分栏承担；这三种形态都不是悬浮对话框，宽度可左右拖动，并在消息之间保持打开；
-- 演示文稿的预览页始终代表用户点击的那份 `.pptx`，容器只是它的缓存：Agent 的修改、预览刷新、保存与丢弃都在这一页里，不会为同一个 `.univer` 再开一个标签页；
+- 演示文稿的预览页始终代表用户点击的那份 `.pptx`，容器只是它的缓存：Agent 的修改（含图片模型生成的替换图）、预览刷新、保存与丢弃都在这一页里。写入另一份文稿不会再开一个标签页，也不会把会话绑定换过去；
 - 演示文稿的四条用户语义：Agent 在原有文稿基础上修改；`save` 把结果写回原 `.pptx`，替换前保留 `<name>.pptx.bak` 备份；`discard` 只回退 Agent 的改动，保留用户此前在预览里自己的编辑；源文件在磁盘上被更新时，再次打开先重新导入，使预览始终与磁盘一致；
 - 停靠面板/预览页是唯一展示与交互面：Sheet、Doc、Slide、Base 与 Board 全部使用同一块面板，不提供悬浮窗口，也不在聊天主对话里重复渲染；
 - 停靠面板打开期间，后续关于该内容的对话编辑同一个 Unit：`univer_status` 报告该内容的 file、改动分支与 Unit，Host 也在系统提示中声明这一事实；
@@ -404,7 +404,7 @@ Tools Consumer 注册面向模型的领域工具，而不是一个透传 CLI 的
 
 `univer_status` 是发现文件状态与显式 Unit ID 的入口。所有内容工具要求显式 Unit ID，所有文件和输出路径都绑定当前 tool exec session 的 workspace，并在 Provider 边界再次验证。`univer_screenshot` 在读取文件前确认 attachment service、PNG 限制与当前模型图片输入能力，生成文件再次经过 workspace realpath 授权，再保存为持久 DSH image attachment；结构化文本保留恢复目标与图片元数据。`univer_print_pdf` 复用同一渲染源与 Render Machine，把 Sheet、Doc、Slide 或 Board 写入授权的 `.pdf` 路径，不支持 Base。`univer_resources` 的 cache root 只由 Provider 配置拥有，不向模型暴露；export 目录和每个实际输出文件都必须通过 workspace 授权。`create` 只确保文件唯一的那条改动分支存在，所有编辑工具省略 `worktreeId` 时都落到它上面。`merge`（保存）与 `discard` 属于用户的审阅决定，只有在用户明确要求时才可调用，并通过 `tools/pre-execute` 返回审批请求，不能由模型自行决定。
 
-`univer_image_edit` 把用户在预览里选中的图片交给图片模型重绘：目标 Unit、页与元素默认取自 `univer_status.openPanel.selection`，即 Viewer 经 `/univer-api/panel/select` 报告的浏览器状态；显式 `pageId` 与 `elementId` 只能成对给出。Provider 从分支内容本身读取参照图（data URI、Gateway 资产或 URL），因此模型改的是分支真实持有的那张图，而不是浏览器里可能已过期的副本；生成结果以 `image.setSource` 写回同一条改动分支，位置、尺寸、旋转与层级全部保留，保存与丢弃语义与其他编辑完全一致。图片接口地址、模型、尺寸档位与 API Key 属于部署配置。未配置 Key 时 `univer_image_edit` 仍然注册，执行时返回稳定的 `IMAGE_API_KEY_MISSING`：缺失的工具对模型不可见，模型会退回无关方案，用户看到的只是"工具不存在"，而不是可修的配置缺口；模型侧因此始终只看到稳定的 `IMAGE_*` 错误 code。
+`univer_image_edit` 把用户在预览里选中的图片交给图片模型重绘：目标 Unit、页与元素默认取自 `univer_status.openPanel.selection`，即 Viewer 经 `/univer-api/panel/select` 报告的浏览器状态；显式 `pageId` 与 `elementId` 只能成对给出。Provider 从分支内容本身读取参照图（data URI、Gateway 资产或 URL），因此模型改的是分支真实持有的那张图，而不是浏览器里可能已过期的副本；生成结果以 `image.setSource` 写回同一条改动分支，位置、尺寸、旋转与层级全部保留，保存与丢弃语义与其他编辑完全一致。会话已经打开一份 `.pptx` 时，指向其他文件的 `univer_image_edit`、`univer_compile_svg` 和新建 Slide Unit，以及任何另一次 `.pptx` 导入或导出，都拒绝并返回 `PRESENTATION_ALREADY_OPEN`：保存动作本身会把当前分支写回原始文件，再生成一份文稿只会让预览打开新标签页。图片接口地址、模型、尺寸档位与 API Key 属于部署配置。未配置 Key 时 `univer_image_edit` 仍然注册，执行时返回稳定的 `IMAGE_API_KEY_MISSING`：缺失的工具对模型不可见，模型会退回无关方案，用户看到的只是"工具不存在"，而不是可修的配置缺口；模型侧因此始终只看到稳定的 `IMAGE_*` 错误 code。
 
 包内 `univer` Skill 描述完整编排顺序，sheet、doc、slide、base 与 board Skill 只在对应 Unit 工作时按需加载，Embed 与跨 Unit 公式各有 Topic Skill。内容以同版本 Univer CLI runtime Skills 为基线：只移除插件未开放的 command，并把 CLI command 调用替换为结构化 DSH Tool 或 Client 自动预览。Slide Skill 要求新页面主动使用 `univer_compile_svg`，结构检查后对每个变更页运行 `univer_lint`，最终逐页运行 `univer_screenshot`；其他 Unit Skill 使用其范围、分页、工作台或画布截图目标。需要图标、Logo、Emoji 或插画时先通过 `univer_resources` 查找和导出。不确定或可能随 SDK 变化的 API 必须通过 `univer_api` 查询。
 
@@ -428,7 +428,7 @@ Viewer 内的 Compare 是 Gateway 的只读 Consumer，不扩大 Client 权限�
 
 Client 通过 `univerTurnDefinition` 按 `callId` 配对结构化工具调用与结果，并分别归约生命周期、内容写入和读取操作；读取操作不能覆盖同一 Turn 已完成的 create、merge 或 discard 转换。该投影与 Host `FileState` 组合后只用于解析预览页的 Viewer 目标与生命周期状态；若 Host 明确确认投影中的文件已不存在，则不打开该目标，以覆盖 Agent 在同一 Turn 中创建并通过其他工具删除临时文件的场景。
 
-预览页只由 `univer_new`、worktree create 和内容写入主动拉起，纯 status、inspect、lint、screenshot、print-pdf 与 export 不主动打开面板。用户保持打开的文件会在下一 Turn 继续显示；用户关闭优先。
+预览页只由 `univer_new`、worktree create、内容写入和 `univer_image_edit` 主动拉起，纯 status、inspect、lint、screenshot、print-pdf 与 export 不主动打开面板。用户保持打开的文件会在下一 Turn 继续显示；用户关闭优先。已经打开一份 `.pptx` 时，指向其他文件的写入既不调用 `openPreview`，也不重新绑定会话，因此生图或导出产生的另一份文稿不会成为新标签页。
 
 本插件不再提供展示偏好开关：原 `autoOpenLivePreview` 与 `conversationReviewCards` 两个设置连同旧版 `settings.register` 与新版 `configForms` 表单一起移除，Client 也不再注入 `settingsScope` 或 `configForms`。右侧预览页与文件树按需预览始终可用，不依赖任何可选设置服务。
 
@@ -441,7 +441,7 @@ Client 通过 `univerTurnDefinition` 按 `callId` 配对结构化工具调用与
 
 `.pptx` 地址按同一排序规则进入这两条路径之一，但正文仍由同一个预览页承担：它调用 `/univer-api/panel/open`（由 Host 完成授权、创建或复用 `.univer` 与专用 `draft`，并导入 Slide Unit），再用返回的 Viewer URL 渲染同一份 Viewer 宿主。预览页不自己解析原文件，也不读取字节。
 
-Agent 写入不另开任何界面：`UniverDock` 从可回放的 Turn 操作里找出目标，先在 Host 侧登记该会话的绑定（`/univer-api/panel`），再按当前打开的预览找到它的资源地址并揭示同一个标签页；预览页随后原地采纳新的 worktree 与 Unit，对比、保存、丢弃按钮始终留在这一页里。目标登记后由 Host 回答它代表哪个文件，因此演示文稿的标签页始终是用户点击的那份 `.pptx`，不会换成缓存它的 `.univer`。因此同一个文件永远只有一个预览页，覆盖 Sheet、Doc、Slide、Base 与 Board 全部类型。预览页关闭后再次写入会重新打开该文件的预览页，而不是另起一个面板。
+Agent 写入不另开任何界面：`UniverDock` 从可回放的 Turn 操作里找出目标，先在 Host 侧登记该会话的绑定（`/univer-api/panel`），再按当前打开的预览找到它的资源地址并揭示同一个标签页；预览页随后原地采纳新的 worktree 与 Unit，对比、保存、丢弃按钮始终留在这一页里。目标登记后由 Host 回答它代表哪个文件，因此演示文稿的标签页始终是用户点击的那份 `.pptx`，不会换成缓存它的 `.univer`，也不会换成这次修改新生成的另一份 `.pptx`。因此同一个文件永远只有一个预览页，覆盖 Sheet、Doc、Slide、Base 与 Board 全部类型。预览页关闭后再次写入会重新打开该文件的预览页，而不是另起一个面板。
 
 只有宿主既无 `sidebarRightTabs` 又无 `betterSidebar` 时，`conversation.input.dock` 才承担回退：它把 `UniverPanel` portal 到浏览器右缘，挂载期间登记绑定、卸载时释放；切换 Unit 不重新挂载 iframe，因此焦点不会闪断。
 

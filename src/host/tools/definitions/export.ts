@@ -2,13 +2,15 @@ import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { Context } from '@deepseek-ai/cordis'
 import { unitId, worktreeId } from '../../service/identifiers.ts'
 import { operationOutput, operationTitle } from '../presentation.ts'
+import { assertPptxExportAllowed } from '../open-presentation.ts'
 import { existingToolFile, newToolPath } from '../workspace.ts'
 
 /** Create the `univer_export` tool definition. */
 export function exportTool(ctx: Context, timeoutMs: number) {
   return defineTool({
     name: 'univer_export',
-    description: 'Export a .univer document or unit to a user-facing file format.',
+    description:
+      'Export a .univer document or unit to a user-facing file format. While a presentation is open, do not export another .pptx: the preview Save writes that same file.',
     timeoutMs,
     parameters: {
       file: {
@@ -34,6 +36,8 @@ export function exportTool(ctx: Context, timeoutMs: number) {
         existingToolFile(exec, args.file),
         newToolPath(exec, args.output)
       ])
+      // Save in the preview writes the original pptx. A second pptx is a new file the preview opens.
+      assertPptxExportAllowed(ctx, exec, output.path)
       return ctx.univer.exportUnitContent(
         {
           workspace: target.workspace,

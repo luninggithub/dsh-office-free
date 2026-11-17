@@ -44,3 +44,8 @@ export function registerOpenPreview(entry: OpenPreview): () => void {
 export function addressOfOpenPreview(sessionId: string, container: string): string | undefined {
   return previews.get(keyOf(sessionId, container))?.address
 }
+
+/** Every preview this session currently has mounted. */
+export function openPreviewsOf(sessionId: string): readonly OpenPreview[] {
+  return [...previews.values()].filter((entry) => entry.sessionId === sessionId)
+}

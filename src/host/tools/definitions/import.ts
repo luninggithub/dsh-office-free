@@ -4,6 +4,7 @@ import { UniverError } from '../../service/errors.ts'
 import { worktreeId } from '../../service/identifiers.ts'
 import { operationOutput, operationTitle } from '../presentation.ts'
 import { stripGatewaySuccessEnvelope } from '../normalize.ts'
+import { assertPptxImportAllowed } from '../open-presentation.ts'
 import { existingToolFile, existingToolPath } from '../workspace.ts'
 
 /** Create the `univer_import` tool definition. */
@@ -11,7 +12,7 @@ export function importTool(ctx: Context, timeoutMs: number) {
   return defineTool({
     name: 'univer_import',
     description:
-      'Import an xlsx, csv, tsv, docx, or pptx file as a new Unit inside an explicit draft worktree.',
+      'Import an xlsx, csv, tsv, docx, or pptx file as a new Unit inside an explicit draft worktree. While a presentation is already open, do not import another pptx; edit that deck in place.',
     timeoutMs,
     parameters: {
       source: {
@@ -45,6 +46,8 @@ export function importTool(ctx: Context, timeoutMs: number) {
         existingToolFile(exec, args.file),
         existingToolPath(exec, args.source)
       ])
+      // The open deck is already that presentation. Importing a pptx again builds a second one.
+      assertPptxImportAllowed(ctx, exec, source.path)
       return stripGatewaySuccessEnvelope(
         await ctx.univer.importUnitContent(
           {

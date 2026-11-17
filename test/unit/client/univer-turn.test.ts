@@ -146,6 +146,7 @@ describe('opensPanel', () => {
     [op('import'), true],
     [op('unit'), true],
     [op('compile-svg'), true],
+    [op('image-edit'), true],
     [op('status'), false],
     [op('inspect'), false],
     [op('screenshot'), false]

@@ -4,6 +4,7 @@ import { unitId, worktreeId } from '../../service/identifiers.ts'
 import { UniverError } from '../../service/errors.ts'
 import { operationOutput, operationTitle } from '../presentation.ts'
 import { stripGatewaySuccessEnvelope } from '../normalize.ts'
+import { assertSameOpenPresentation } from '../open-presentation.ts'
 import { existingToolFile } from '../workspace.ts'
 
 /** Create the `univer_unit` tool definition. */
@@ -40,6 +41,10 @@ export function unitTool(ctx: Context, timeoutMs: number) {
     output: operationOutput,
     async execute(args, exec) {
       const target = await existingToolFile(exec, args.file)
+      // A new Slide Unit in some other file is a second presentation. Other kinds stay available.
+      if (args.action === 'create' && args.kind === 'slide') {
+        assertSameOpenPresentation(ctx, exec, target.path)
+      }
       if (args.action === 'create') {
         if (args.kind === undefined || args.name === undefined || args.name.length === 0) {
           throw new UniverError(

@@ -14,11 +14,11 @@ This Skill changes a presentation the user already has. A request to produce a n
 - Continue the deck the side panel holds: use the `file`, `worktreeId`, and `unitId` reported by `univer_status.openPanel`.
 - Redesign an existing page: author SVG and call `univer_compile_svg`. Do not hand-write Facade drawing calls for generated page content.
 - Edit existing content: use `univer_execute` with live Facade handles.
-- Edit or replace the picture the user selected in the panel: call `univer_image_edit` with the user's wording as `prompt` and no target ids; the panel supplies file, Unit, page, and element. It keeps the image's frame, so do not rewrite position or size afterwards. Do not route this through `univer_execute` or SVG compilation.
+- Edit or replace a picture, including one produced by an image model such as Volcengine Ark: call `univer_image_edit` with the user's wording as `prompt`. The panel supplies file, Unit, page, and element when the user selected the picture; otherwise pass the open deck's ids. The result replaces that picture on the open deck. It keeps the image's frame, so do not rewrite position or size afterwards. Do not route this through `univer_execute`, SVG compilation, a new file, or the Office path.
 - Insert or update native charts: reserve the rectangle in the page SVG, then use the direct
   `FSlide` chart methods through `univer_execute`.
 - Verify every changed page: `univer_inspect`, then `univer_lint`, then `univer_screenshot` and inspect the returned PNG.
-- Export only after verification, and only when the user asks: `univer_export` to `.pptx`.
+- Do not export a second `.pptx` while this deck is open. The preview Save writes the original file, and `univer_export` to another `.pptx` is refused.
 
 Facade page indexes are zero-based (`getSlideByIndex`, `getSlides()[i]`). Tool page numbers are one-based: `univer_compile_svg.page` and numeric `univer_lint.pages` use `1` for the first page. Prefer stable page IDs when carrying a page from inspection into Facade code.
 
@@ -198,7 +198,7 @@ The panel reports the image the user double-clicked as `univer_status.openPanel.
 { "prompt": "改成水彩风格，保留主体构图" }
 ```
 
-The tool reads the source image from the branch, sends it to the image model with that prompt, and writes the result back through `image.setSource`, so the element keeps its frame, rotation, and stacking. Pass `pageId` and `elementId` explicitly only when the user picked an image and the conversation names a different one; pass `model` or `size` only when the user asks for them. A failure that names a missing key or selection is a configuration or selection problem, not a reason to redraw the page.
+The tool reads the source image from the branch, sends it to the image model with that prompt, and writes the result back through `image.setSource`, so the element keeps its frame, rotation, and stacking. The open `.pptx` tab stays that file: do not create, import, or export another presentation because the image was generated. Pass `pageId` and `elementId` explicitly only when the user picked an image and the conversation names a different one; pass `model` or `size` only when the user asks for them. A failure that names a missing key or selection is a configuration or selection problem, not a reason to redraw the page or generate a new file.
 
 ## Editing existing pages
 

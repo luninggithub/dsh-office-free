@@ -12,6 +12,7 @@ import {
   type UniverTurnOperation
 } from '../conversation/univer-turn-definition.ts'
 import { useGatewayStatus, useUniverStates } from '../hooks/use-univer-state.ts'
+import { keepsOpenPresentation } from '../open-presentation.ts'
 import { addressOfOpenPreview } from '../preview-registry.ts'
 import { sessionFileAddress } from '../resource-address.ts'
 import type { ViewerLocaleInjected } from '../viewer-locale.ts'
@@ -110,6 +111,10 @@ function UniverPreviewOpener(props: {
   const { sessionId, cwd, openPreview } = props
   React.useEffect(() => {
     if (request === null) return
+    // A presentation tab is already showing the deck the user opened. Writes that name some
+    // other file — a regenerated pptx, a second container — must not rebind the session or
+    // open another tab. Edits of this deck still fall through and reveal the same address.
+    if (keepsOpenPresentation(sessionId, request.file)) return
     void (async () => {
       // The Host answers which file this tab represents: a presentation stays the `.pptx` the user
       // clicked even when the write and the container are named differently. A closed tab therefore

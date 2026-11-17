@@ -4,6 +4,7 @@ import type { OpenPanel, PanelImageSelection } from '../../../shared/wire/panel.
 import { UniverError } from '../../service/errors.ts'
 import { unitId, worktreeId } from '../../service/identifiers.ts'
 import { operationOutput, operationTitle } from '../presentation.ts'
+import { assertSameOpenPresentation } from '../open-presentation.ts'
 import { existingToolFile } from '../workspace.ts'
 
 /** Target the edit runs against, after the panel fills in whatever the caller omitted. */
@@ -69,6 +70,8 @@ export function imageEditTool(ctx: Context, timeoutMs: number) {
         )
       }
       const target = await existingToolFile(exec, file)
+      // The generated image replaces a picture on the open deck. Another file would be a new ppt.
+      assertSameOpenPresentation(ctx, exec, target.path)
       const resolved = resolveTarget(args, panel, selection, target.path)
       return ctx.univer.editSlideImage(
         {

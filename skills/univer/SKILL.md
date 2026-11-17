@@ -33,7 +33,7 @@ This plugin owns modification of existing content, not generation:
 - Every content write requires `file` and `unitId`; the branch is resolved for you.
 - `univer_execute` persists only when Facade mutations occurred. A read-only execution produces no revision.
 - Saving (`merge`) and discarding (`discard`) are the user's decisions in the preview, behind explicit approval. Do not save or discard to finish a task.
-- A presentation opened as a `.pptx` keeps that file as its identity: saving writes the deck back to the original `.pptx` and keeps the previous version as `<name>.pptx.bak`; discarding reverts only your edits and keeps pages the user changed in the preview themselves.
+- A presentation opened as a `.pptx` keeps that file as its identity for the whole edit, including image generation. Edit its Slide Unit in place with `univer_execute`, `univer_compile_svg`, or `univer_image_edit`. Do not create another container, import another `.pptx`, or export a second `.pptx`; saving in the preview writes the original file and keeps the previous version as `<name>.pptx.bak`. Discarding reverts only your edits and keeps pages the user changed in the preview themselves.
 - Tool success is not correctness evidence. Read the changed model back and verify task-specific assertions.
 
 ## SVG resources
