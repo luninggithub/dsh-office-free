@@ -6,6 +6,7 @@ import type { ConnectionTrust } from './viewer-proxy.ts'
 import { gatewayStartRoute } from './routes/gateway.ts'
 import {
   panelCloseRoute,
+  panelImageEditRoute,
   panelOpenRoute,
   panelSelectRoute,
   panelStateRoute
@@ -79,6 +80,28 @@ export function createUniverRouter(
         sendJson(response, 200, panelSelectRoute(service, sessions, await readJsonBody(request)))
         return
       }
+      if (request.method === 'POST' && url.pathname === '/univer-api/panel/image-edit') {
+        const controller = new AbortController()
+        const abortIfDisconnected = (): void => {
+          if (!response.writableEnded) controller.abort()
+        }
+        response.on('close', abortIfDisconnected)
+        try {
+          sendJson(
+            response,
+            200,
+            await panelImageEditRoute(
+              service,
+              sessions,
+              await readJsonBody(request),
+              controller.signal
+            )
+          )
+        } finally {
+          response.removeListener('close', abortIfDisconnected)
+        }
+        return
+      }
       if (request.method === 'GET' && url.pathname === '/univer-api/panel') {
         sendJson(response, 200, panelStateRoute(service, url.searchParams.get('sessionId')))
         return
@@ -95,7 +118,8 @@ export function createUniverRouter(
           error.code === 'UNIT_NOT_FOUND' ||
           error.code === 'WORKTREE_NOT_FOUND' ||
           error.code === 'SESSION_SCOPE_UNAVAILABLE' ||
-          error.code === 'SESSION_SCOPE_DENIED')
+          error.code === 'SESSION_SCOPE_DENIED' ||
+          error.code === 'IMAGE_SELECTION_MISSING')
       const forbidden =
         error instanceof UniverError &&
         (error.code === 'FILE_PERMISSION_DENIED' || error.code === 'SESSION_SCOPE_DENIED')

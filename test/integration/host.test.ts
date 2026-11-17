@@ -129,6 +129,7 @@ describe('browser routes and tools', () => {
   let toolContext: Context
   let owner: any
   const calls: Array<[string, Record<string, unknown>?]> = []
+  let imageEditPanel: Record<string, unknown> | undefined
 
   let state: any
 
@@ -235,10 +236,14 @@ describe('browser routes and tools', () => {
       },
       panelOf(sessionId: string) {
         calls.push(['panelOf', { sessionId }])
-        return undefined
+        return imageEditPanel
       },
       reportPanelSelection(request: Record<string, unknown>) {
         calls.push(['reportPanelSelection', request])
+      },
+      async editSlideImage(request: Record<string, unknown>) {
+        calls.push(['editSlideImage', request])
+        return { ok: true }
       }
     }
     const sessions = {
@@ -491,6 +496,44 @@ describe('browser routes and tools', () => {
         status: 400,
         body: { code: 'INVALID_REQUEST' }
       })
+    })
+
+    it('forwards a region prompt to editSlideImage for the open panel', async () => {
+      const edit = (body: unknown) =>
+        json('/univer-api/panel/image-edit', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify(body)
+        })
+      const prompt = '修改<point>1 2</point>区域内的内容：亮一点'
+      expect(
+        await edit({ sessionId: SESSION, pageId: 'page-1', elementId: 'image-1', prompt })
+      ).toMatchObject({ status: 400, body: { code: 'IMAGE_SELECTION_MISSING' } })
+
+      imageEditPanel = {
+        source: null,
+        file: realFile,
+        worktreeId: WORKTREE,
+        unitId: 'unit-1',
+        viewerUrl: '/univer-viewer/?file=KEY',
+        selection: null
+      }
+      try {
+        expect(
+          await edit({ sessionId: SESSION, pageId: 'page-1', elementId: 'image-1', prompt })
+        ).toMatchObject({ status: 200, body: { ok: true } })
+        expect(calls.at(-1)?.[0]).toBe('editSlideImage')
+        expect(calls.at(-1)?.[1]).toMatchObject({
+          worktreeId: WORKTREE,
+          unitId: 'unit-1',
+          pageId: 'page-1',
+          elementId: 'image-1',
+          prompt
+        })
+        expect(String(calls.at(-1)?.[1]?.file)).toMatch(/smoke\.univer$/u)
+      } finally {
+        imageEditPanel = undefined
+      }
     })
   })
 

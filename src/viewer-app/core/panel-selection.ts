@@ -48,7 +48,7 @@ export function watchPanelSelection(univer: Univer, unitId: string): () => void 
       if (timer !== undefined) clearTimeout(timer)
       timer = setTimeout(() => {
         timer = undefined
-        publish(selectedImage(drawings, unitId, snapshot))
+        publish(selectedSlideImage(drawings, unitId, snapshot))
       }, REPORT_DEBOUNCE_MS)
     })
   } catch {
@@ -68,7 +68,7 @@ export function watchPanelSelection(univer: Univer, unitId: string): () => void 
  * Text, shapes, and multi-selections are not image targets, so they clear the Host's selection
  * rather than leaving a stale image behind that a later prompt would silently rewrite.
  */
-function selectedImage(
+export function selectedSlideImage(
   drawings: ISlideDrawingService,
   unitId: string,
   snapshot: ISlideDrawingStateSnapshot

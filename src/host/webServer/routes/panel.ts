@@ -7,8 +7,10 @@ import {
   univerFilePath,
   worktreeId as brandedWorktreeId
 } from '../../service/identifiers.ts'
+import type { UniverOperationResult } from '../../service/types.ts'
 import type { UniverService } from '../../service/univer-service.ts'
 import { resolveExistingUniverPath, resolveExistingWorkspacePath } from '../../service/workspace.ts'
+import { resolveAuthorizedFile } from '../session-scope.ts'
 
 /** Body of one panel open, close, or selection request from the browser. */
 interface PanelBody {
@@ -18,6 +20,7 @@ interface PanelBody {
   readonly worktreeId?: unknown
   readonly pageId?: unknown
   readonly elementId?: unknown
+  readonly prompt?: unknown
 }
 
 /**
@@ -92,6 +95,44 @@ export function panelSelectRoute(
   return { ok: true }
 }
 
+/**
+ * Apply one region-edit prompt to the image the preview is annotating.
+ *
+ * The browser already packaged `<point>` and `<bbox>` in the bitmap's pixel space. This route only
+ * checks that the session owns the open panel, then uses the same `editSlideImage` path as
+ * `univer_image_edit`. Disconnecting before the response ends aborts that call, so Stop does not
+ * leave a replacement behind.
+ */
+export async function panelImageEditRoute(
+  service: UniverService,
+  sessions: SessionStore,
+  body: unknown,
+  signal?: AbortSignal
+): Promise<UniverOperationResult> {
+  const { sessionId, pageId, elementId, prompt } = requireImageEdit(body)
+  sessionWorkspace(sessionId, sessions)
+  const panel = service.panelOf(sessionId)
+  if (panel === undefined || panel.worktreeId.length === 0 || panel.unitId.length === 0) {
+    throw new UniverError(
+      'Open a presentation in the right panel before editing an image.',
+      'IMAGE_SELECTION_MISSING'
+    )
+  }
+  const authorized = await resolveAuthorizedFile(panel.file, sessionId, sessions)
+  return service.editSlideImage(
+    {
+      workspace: authorized.workspace,
+      file: authorized.path,
+      worktreeId: brandedWorktreeId(panel.worktreeId),
+      unitId: brandedUnitId(panel.unitId),
+      pageId,
+      elementId,
+      prompt
+    },
+    signal
+  )
+}
+
 /** Read the panel target a session currently holds, for panel remounts. */
 export function panelStateRoute(
   service: UniverService,
@@ -154,6 +195,28 @@ function requireSelection(body: unknown): {
   if (pageId === undefined || elementId === undefined)
     return { sessionId, pageId: undefined, elementId: undefined }
   return { sessionId, pageId, elementId }
+}
+
+function requireImageEdit(body: unknown): {
+  readonly sessionId: string
+  readonly pageId: string
+  readonly elementId: string
+  readonly prompt: string
+} {
+  if (typeof body !== 'object' || body === null || Array.isArray(body))
+    throw new UniverError('JSON object body is required', 'INVALID_REQUEST')
+  const value = body as PanelBody
+  const sessionId = requireSessionId(value.sessionId)
+  const pageId = readId(value.pageId)
+  const elementId = readId(value.elementId)
+  if (pageId === undefined || elementId === undefined) {
+    throw new UniverError('pageId and elementId are required', 'INVALID_REQUEST')
+  }
+  if (typeof value.prompt !== 'string' || value.prompt.trim().length === 0) {
+    throw new UniverError('prompt is required', 'INVALID_REQUEST')
+  }
+  if (value.prompt.length > 12_000) throw new UniverError('prompt is too long', 'INVALID_REQUEST')
+  return { sessionId, pageId, elementId, prompt: value.prompt.trim() }
 }
 
 function readId(value: unknown): string | undefined {

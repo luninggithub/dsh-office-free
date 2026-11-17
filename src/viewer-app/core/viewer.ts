@@ -62,6 +62,7 @@ import {
   type UnitType
 } from '@univer/collab-gateway-contract'
 import { isProxyServedViewer, resolveWebSocketUrl } from './config'
+import { mountImageRegionEditor } from './image-region-editor.tsx'
 import { watchPanelSelection } from './panel-selection.ts'
 import { startPreviewSheetFormulaCalculation } from './preview-formula'
 import {
@@ -270,6 +271,11 @@ export async function createViewer(opts: ViewerOptions): Promise<ViewerHandle> {
   // Only a Slide has selectable images, and only the right panel has a conversation to report to.
   const stopSelectionReports =
     opts.unitType === UNIT_TYPE_SLIDE ? watchPanelSelection(univer, opts.unitId) : undefined
+  // Region editing writes through the Host, so a read-only or diff Viewer never offers it.
+  const stopRegionEditor =
+    opts.unitType === UNIT_TYPE_SLIDE && editable
+      ? mountImageRegionEditor(univer, opts.unitId)
+      : undefined
 
   if (readOnlyEnforcement === 'sheet-permission') {
     enforceSheetViewerReadOnlyPermissions(
@@ -290,6 +296,7 @@ export async function createViewer(opts: ViewerOptions): Promise<ViewerHandle> {
     dispose: () => {
       documentViewPosition?.dispose()
       stopSelectionReports?.()
+      stopRegionEditor?.()
       formulaResultAppliedSubscription.unsubscribe()
       sheetResourceRefDataProvider.dispose()
       disposeDebugEndpoint()
