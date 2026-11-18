@@ -1712,19 +1712,19 @@ var PptxDocument = class _PptxDocument {
     const relations = readRelations(this.text("ppt/_rels/presentation.xml.rels"));
     const list = findDescendant(presentation, "sldIdLst");
     if (list === void 0) return [];
-    const pages2 = [];
+    const pages = [];
     for (const slideId of childElements(presentation, list.openEnd, list.closeStart)) {
       if (slideId.name !== "sldId") continue;
       const relationId = attribute(slideId.attrs, "id", true);
       const target = relationId === void 0 ? void 0 : relations.get(relationId);
       if (target === void 0 || !target.type.endsWith("/slide")) continue;
       const partName = resolvePart("ppt/presentation.xml", target.target);
-      pages2.push({
+      pages.push({
         partName,
         shapes: shapesOf(this.text(partName), partName, this.slideRelations(partName))
       });
     }
-    return pages2;
+    return pages;
   }
   /**
    * Visual page for one slide: theme colors and fonts, master and layout chrome,
@@ -1918,16 +1918,21 @@ var page = {
   slideIndex: 0,
   scale: 1,
   selectedId: void 0,
+  editing: false,
+  editorShape: void 0,
+  thumbIndex: -1,
   images: /* @__PURE__ */ new Map()
 };
+var pressing = false;
 var openButton = document.querySelector("#open");
 var fileInput = document.querySelector("#file");
 var fileName = document.querySelector("#file-name");
 var saveButton = document.querySelector("#save");
-var pages = document.querySelector("#pages");
+var thumbs = document.querySelector("#thumbs");
+var sheet = document.querySelector("#sheet");
 var canvas = document.querySelector("#slide");
-var shapeName2 = document.querySelector("#shape-name");
-var textInput = document.querySelector("#text");
+var editorFrame = document.querySelector("#editor-frame");
+var editor = document.querySelector("#editor");
 var context = canvas?.getContext("2d");
 openButton?.addEventListener("click", () => fileInput?.click());
 fileInput?.addEventListener("change", () => {
@@ -1939,17 +1944,66 @@ saveButton?.addEventListener("click", () => {
   if (doc === null) return;
   void doc.save().then((bytes) => download(bytes));
 });
-canvas?.addEventListener("click", (event) => {
-  const shape = hitTest(event.offsetX, event.offsetY);
+sheet?.addEventListener("pointerdown", (event) => {
+  if (event.button !== 0 || canvas === null || !(event.target instanceof Node)) return;
+  pressing = true;
+  const box = canvas.getBoundingClientRect();
+  const shape = hitTest(event.clientX - box.left, event.clientY - box.top);
+  const sameText = page.editing && shape?.id === page.selectedId && editor !== null && (event.target === editor || editor.contains(event.target));
+  if (sameText) return;
+  event.preventDefault();
   page.selectedId = shape?.id;
+  page.editing = shape?.editable === true;
   render();
+  if (shape?.editable === true) placeCaret(event.clientX, event.clientY);
 });
-textInput?.addEventListener("input", () => {
+sheet?.addEventListener("mousedown", (event) => {
+  if (event.button !== 0 || !(event.target instanceof Node)) return;
+  if (editor !== null && (event.target === editor || editor.contains(event.target))) return;
+  event.preventDefault();
+});
+window.addEventListener("pointerup", () => {
+  if (!pressing) return;
+  pressing = false;
+  if (page.editing && editor !== null && document.activeElement !== editor) editor.focus();
+});
+window.addEventListener("pointercancel", () => {
+  pressing = false;
+});
+canvas?.addEventListener("mousemove", (event) => {
+  const shape = hitTest(event.offsetX, event.offsetY);
+  canvas.style.cursor = shape?.editable === true ? "text" : "default";
+});
+editor?.addEventListener("input", () => {
   const doc = page.doc;
   const shape = selected();
-  if (doc === null || shape === void 0 || !shape.editable || textInput === null) return;
-  doc.setShapeText(page.slideIndex, shape.id, textInput.value);
+  if (doc === null || editor === null || shape === void 0 || !shape.editable) return;
+  try {
+    doc.setShapeText(page.slideIndex, shape.id, editor.textContent ?? "");
+  } catch (error) {
+    note(error instanceof Error ? error.message : "\u65E0\u6CD5\u4FEE\u6539\u6587\u5B57");
+    return;
+  }
   render();
+});
+editor?.addEventListener("beforeinput", (event) => {
+  if (event.inputType !== "insertParagraph" && event.inputType !== "insertLineBreak") return;
+  event.preventDefault();
+  insertPlain("\n");
+});
+editor?.addEventListener("keydown", (event) => {
+  if (event.key !== "Escape") return;
+  event.preventDefault();
+  page.editing = false;
+  render();
+  editor.blur();
+});
+editor?.addEventListener("blur", () => {
+  window.setTimeout(() => {
+    if (pressing || document.activeElement === editor) return;
+    page.editing = false;
+    render();
+  }, 0);
 });
 window.addEventListener("resize", () => {
   if (page.doc !== null) render();
@@ -1985,6 +2039,9 @@ async function openFile(file) {
   }
   page.slideIndex = 0;
   page.selectedId = void 0;
+  page.editing = false;
+  page.editorShape = void 0;
+  page.thumbIndex = -1;
   page.images.clear();
   if (saveButton !== null) saveButton.disabled = false;
   note(file.name);
@@ -1999,6 +2056,102 @@ function safeFileName(name) {
 }
 function selected() {
   return page.doc?.scene(page.slideIndex).shapes.find((shape) => shape.id === page.selectedId);
+}
+function syncEditor(shape) {
+  if (editorFrame === null || editor === null) return;
+  if (shape === void 0 || !shape.editable || !page.editing) {
+    editorFrame.hidden = true;
+    page.editorShape = void 0;
+    return;
+  }
+  const switched = page.editorShape !== shape.id;
+  page.editorShape = shape.id;
+  editorFrame.hidden = false;
+  placeEditor(shape);
+  if (document.activeElement !== editor || switched) editor.textContent = shape.plain;
+}
+function placeEditor(shape) {
+  if (editorFrame === null || editor === null) return;
+  const scale = page.scale;
+  const text = shape.text;
+  const run = text?.paragraphs[0]?.runs[0];
+  const paragraph = text?.paragraphs[0];
+  editorFrame.style.left = `${shape.x / EMU_PER_PIXEL * scale}px`;
+  editorFrame.style.top = `${shape.y / EMU_PER_PIXEL * scale}px`;
+  editorFrame.style.width = `${shape.width / EMU_PER_PIXEL * scale}px`;
+  editorFrame.style.height = `${shape.height / EMU_PER_PIXEL * scale}px`;
+  editorFrame.style.transform = `rotate(${shape.rotation}deg)`;
+  const pad = text?.padding;
+  editorFrame.style.padding = pad === void 0 ? "0" : `${pad.top / EMU_PER_PIXEL * scale}px ${pad.right / EMU_PER_PIXEL * scale}px ${pad.bottom / EMU_PER_PIXEL * scale}px ${pad.left / EMU_PER_PIXEL * scale}px`;
+  const anchor = text?.anchor ?? "t";
+  editorFrame.style.justifyContent = anchor === "ctr" ? "center" : anchor === "b" ? "flex-end" : "flex-start";
+  const fontPx = (run?.fontSize ?? 18) * 96 / 72;
+  editor.style.fontSize = `${fontPx * scale}px`;
+  editor.style.fontWeight = run?.bold === true ? "700" : "400";
+  editor.style.fontStyle = run?.italic === true ? "italic" : "";
+  editor.style.fontFamily = run === void 0 ? 'Calibri, "Microsoft YaHei", sans-serif' : editorFamily(run);
+  editor.style.color = run?.color ?? "#000000";
+  editor.style.textAlign = paragraph?.align === "ctr" ? "center" : paragraph?.align === "r" ? "right" : "left";
+  editor.style.textDecoration = run?.underline === true ? "underline" : "none";
+  const line = paragraph === void 0 ? fontPx * 1.2 : lineBox(run, paragraph);
+  editor.style.lineHeight = `${line * scale}px`;
+}
+function editorFamily(run) {
+  return [
+    quotedFace(run.eastAsian),
+    quotedFace(run.latin),
+    '"Microsoft YaHei"',
+    '"\u5FAE\u8F6F\u96C5\u9ED1"',
+    "Calibri",
+    "Arial",
+    "sans-serif"
+  ].filter((item) => item.length > 0).join(", ");
+}
+function quotedFace(name) {
+  return name.length > 0 ? `"${name.replace(/"/g, "")}"` : "";
+}
+function placeCaret(clientX, clientY) {
+  if (editor === null) return;
+  editor.focus();
+  void editor.offsetWidth;
+  const range = caretRange(clientX, clientY);
+  const selection = document.getSelection();
+  if (range !== null && editor.contains(range.startContainer)) {
+    range.collapse(true);
+    selection?.removeAllRanges();
+    selection?.addRange(range);
+    return;
+  }
+  const end = document.createRange();
+  end.selectNodeContents(editor);
+  end.collapse(false);
+  selection?.removeAllRanges();
+  selection?.addRange(end);
+}
+function caretRange(clientX, clientY) {
+  if (document.caretRangeFromPoint !== void 0)
+    return document.caretRangeFromPoint(clientX, clientY);
+  const positioned = document.caretPositionFromPoint?.(clientX, clientY);
+  if (positioned === null || positioned === void 0) return null;
+  const range = document.createRange();
+  range.setStart(positioned.offsetNode, positioned.offset);
+  range.collapse(true);
+  return range;
+}
+function insertPlain(value) {
+  if (editor === null) return;
+  const selection = document.getSelection();
+  if (selection === null || selection.rangeCount === 0 || !editor.contains(selection.anchorNode))
+    return;
+  const range = selection.getRangeAt(0);
+  range.deleteContents();
+  const node = document.createTextNode(value);
+  range.insertNode(node);
+  range.setStartAfter(node);
+  range.collapse(true);
+  selection.removeAllRanges();
+  selection.addRange(range);
+  editor.dispatchEvent(new Event("input", { bubbles: true }));
 }
 function hitTest(x, y) {
   const shapes = page.doc?.scene(page.slideIndex).shapes ?? [];
@@ -2045,53 +2198,98 @@ async function loadImages() {
   );
 }
 function render() {
-  if (canvas === null || context === null || context === void 0 || pages === null || shapeName2 === null || textInput === null) {
+  if (canvas === null || context === null || context === void 0) return;
+  const doc = page.doc;
+  if (doc === null) {
+    thumbs?.replaceChildren();
+    syncEditor(void 0);
     return;
   }
-  const doc = page.doc;
-  pages.replaceChildren();
-  if (doc === null) return;
-  const slides = doc.slides();
-  slides.forEach((_slide, index) => {
-    const button = document.createElement("button");
-    button.type = "button";
-    button.textContent = `\u7B2C ${index + 1} \u9875`;
-    if (index === page.slideIndex) button.className = "current";
-    button.addEventListener("click", () => {
-      page.slideIndex = index;
-      page.selectedId = void 0;
-      render();
-    });
-    pages.append(button);
-  });
+  syncThumbs(doc);
   const scene = doc.scene(page.slideIndex);
   const width = Math.max(1, scene.width / EMU_PER_PIXEL);
   const height = Math.max(1, scene.height / EMU_PER_PIXEL);
-  const available = Math.max(1, (canvas.parentElement?.clientWidth ?? width) - 48);
+  const stage = canvas.closest(".stage");
+  const available = Math.max(1, (stage?.clientWidth ?? width + 48) - 48);
   const scale = Math.min(1, available / width);
   page.scale = scale;
   const ratio = window.devicePixelRatio || 1;
-  canvas.width = Math.round(width * scale * ratio);
-  canvas.height = Math.round(height * scale * ratio);
-  canvas.style.width = `${width * scale}px`;
-  canvas.style.height = `${height * scale}px`;
-  context.setTransform(ratio * scale, 0, 0, ratio * scale, 0, 0);
-  context.clearRect(0, 0, width, height);
-  context.fillStyle = "#ffffff";
-  context.fillRect(0, 0, width, height);
-  paintBackdrop(context, scene.background, width, height);
-  for (const shape2 of scene.shapes) drawShape(context, shape2);
+  paintCanvas(
+    canvas,
+    context,
+    scene,
+    width,
+    height,
+    scale,
+    ratio,
+    page.editing ? page.selectedId : void 0
+  );
   const shape = selected();
   if (shape !== void 0 && shape.selectable) strokeSelection(context, shape);
-  if (shape === void 0) {
-    shapeName2.textContent = "\u672A\u9009\u4E2D\u5F62\u72B6";
-    textInput.value = "";
-    textInput.disabled = true;
-    return;
-  }
-  shapeName2.textContent = shape.name.length > 0 ? shape.name : `\u5F62\u72B6 ${shape.id}`;
-  textInput.disabled = !shape.editable;
-  if (document.activeElement !== textInput) textInput.value = shape.plain;
+  syncEditor(shape);
+}
+function syncThumbs(doc) {
+  if (thumbs === null) return;
+  const slides = doc.slides();
+  while (thumbs.children.length > slides.length) thumbs.lastElementChild?.remove();
+  const slideChanged = page.thumbIndex !== page.slideIndex;
+  slides.forEach((_, index) => {
+    const existing = thumbs.children.item(index);
+    const button = existing instanceof HTMLButtonElement ? existing : createThumb();
+    if (existing !== button) thumbs.append(button);
+    button.dataset.index = String(index);
+    button.classList.toggle("current", index === page.slideIndex);
+    if (index === page.slideIndex) button.setAttribute("aria-current", "true");
+    else button.removeAttribute("aria-current");
+    const label = button.querySelector(".thumb-index");
+    if (label !== null) label.textContent = String(index + 1);
+    const preview = button.querySelector("canvas");
+    if (preview !== null) paintThumb(preview, doc.scene(index));
+    if (slideChanged && index === page.slideIndex) button.scrollIntoView({ block: "nearest" });
+  });
+  page.thumbIndex = page.slideIndex;
+}
+function createThumb() {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "thumb";
+  const label = document.createElement("span");
+  label.className = "thumb-index";
+  button.append(label, document.createElement("canvas"));
+  button.addEventListener("pointerdown", (event) => {
+    if (event.button !== 0) return;
+    event.preventDefault();
+    const next = Number(button.dataset.index);
+    if (!Number.isInteger(next)) return;
+    page.slideIndex = next;
+    page.selectedId = void 0;
+    page.editing = false;
+    if (document.activeElement === editor) editor?.blur();
+    render();
+  });
+  return button;
+}
+function paintThumb(preview, scene) {
+  const ctx = preview.getContext("2d");
+  if (ctx === null) return;
+  const width = Math.max(1, scene.width / EMU_PER_PIXEL);
+  const height = Math.max(1, scene.height / EMU_PER_PIXEL);
+  const cssWidth = 148;
+  const scale = cssWidth / width;
+  const ratio = window.devicePixelRatio || 1;
+  paintCanvas(preview, ctx, scene, width, height, scale, ratio, void 0);
+}
+function paintCanvas(target, ctx, scene, width, height, scale, ratio, omitTextId) {
+  target.width = Math.max(1, Math.round(width * scale * ratio));
+  target.height = Math.max(1, Math.round(height * scale * ratio));
+  target.style.width = `${width * scale}px`;
+  target.style.height = `${height * scale}px`;
+  ctx.setTransform(ratio * scale, 0, 0, ratio * scale, 0, 0);
+  ctx.clearRect(0, 0, width, height);
+  ctx.fillStyle = "#ffffff";
+  ctx.fillRect(0, 0, width, height);
+  paintBackdrop(ctx, scene.background, width, height);
+  for (const shape of scene.shapes) drawShape(ctx, shape, omitTextId);
 }
 function paintBackdrop(ctx, fill, width, height) {
   if (fill.kind === "none") return;
@@ -2103,7 +2301,7 @@ function paintBackdrop(ctx, fill, width, height) {
   ctx.fillStyle = paintFillStyle(ctx, fill, 0, 0, width, height);
   ctx.fillRect(0, 0, width, height);
 }
-function drawShape(ctx, shape) {
+function drawShape(ctx, shape, omitTextId) {
   const x = shape.x / EMU_PER_PIXEL;
   const y = shape.y / EMU_PER_PIXEL;
   const width = shape.width / EMU_PER_PIXEL;
@@ -2156,7 +2354,7 @@ function drawShape(ctx, shape) {
     ctx.stroke();
     ctx.setLineDash([]);
   }
-  if (shape.text !== void 0) drawText(ctx, shape, x, y, width, height);
+  if (shape.text !== void 0 && shape.id !== omitTextId) drawText(ctx, shape, x, y, width, height);
   ctx.restore();
 }
 function strokeSelection(ctx, shape) {
@@ -2292,7 +2490,6 @@ function drawText(ctx, shape, x, y, width, height) {
   ctx.save();
   trace(ctx, shape, x, y, width, height);
   ctx.clip();
-  ctx.textBaseline = "top";
   const laid = text.paragraphs.map((paragraph) => layoutParagraph(ctx, paragraph, innerWidth));
   const contentHeight = laid.reduce((sum, paragraph) => sum + paragraph.height, 0);
   let cursor = y + pad.top;
@@ -2321,17 +2518,19 @@ function layoutParagraph(ctx, paragraph, innerWidth) {
       for (const token of tokenize(part)) {
         if (line.tokens.length === 0 && token.text.trim().length === 0) continue;
         ctx.font = fontOf(run, token.cjk);
-        const width = ctx.measureText(token.text).width;
+        const measured = ctx.measureText(token.text);
+        const width = measured.width;
         if (width > contentWidth && token.text.length > 1) {
           for (const char of token.text) {
-            const charWidth = ctx.measureText(char).width;
+            const charMeasured = ctx.measureText(char);
+            const charWidth = charMeasured.width;
             if (line.width + charWidth > contentWidth && line.width > 0) push();
-            addToken(line, char, charWidth, token.cjk, run, paragraph);
+            addToken(line, char, charWidth, charMeasured, token.cjk, run, paragraph);
           }
           continue;
         }
         if (line.width + width > contentWidth && line.width > 0) push();
-        addToken(line, token.text, width, token.cjk, run, paragraph);
+        addToken(line, token.text, width, measured, token.cjk, run, paragraph);
       }
     });
   }
@@ -2354,10 +2553,21 @@ function layoutParagraph(ctx, paragraph, innerWidth) {
 function emptyLine(paragraph) {
   return { width: 0, height: lineBox(paragraph.runs[0], paragraph), tokens: [] };
 }
-function addToken(line, text, width, cjk, run, paragraph) {
-  line.tokens.push({ text, width, cjk, run });
+function addToken(line, text, width, measured, cjk, run, paragraph) {
+  const size = run.fontSize * 96 / 72;
+  const { ascent, descent } = fontEdges(measured, size);
+  line.tokens.push({ text, width, ascent, descent, cjk, run });
   line.width += width;
   line.height = Math.max(line.height, lineBox(run, paragraph));
+}
+function fontEdges(measured, size) {
+  const ascent = measured.fontBoundingBoxAscent;
+  const descent = measured.fontBoundingBoxDescent;
+  if (ascent > 0 || descent > 0) return { ascent, descent };
+  return { ascent: size * 0.8, descent: size * 0.2 };
+}
+function lineBaseline(top, height, ascent, descent) {
+  return top + (height - (ascent + descent)) / 2 + ascent;
 }
 function lineBox(run, paragraph) {
   if (paragraph.linePt > 0) return paragraph.linePt * 96 / 72;
@@ -2371,22 +2581,31 @@ function drawParagraph(ctx, paragraph, x, y, innerWidth) {
     let offset = textX;
     if (paragraph.align === "ctr") offset = x + (innerWidth - line.width) / 2;
     if (paragraph.align === "r") offset = x + innerWidth - line.width;
+    ctx.textBaseline = "alphabetic";
     if (index === 0 && paragraph.bullet !== void 0 && paragraph.bulletRun !== void 0) {
       ctx.font = fontOf(paragraph.bulletRun, isCjk(paragraph.bullet));
       ctx.fillStyle = paragraph.bulletRun.color;
-      ctx.fillText(paragraph.bullet, textX + paragraph.indent, cursor);
+      const size = paragraph.bulletRun.fontSize * 96 / 72;
+      const edge = fontEdges(ctx.measureText(paragraph.bullet), size);
+      ctx.fillText(
+        paragraph.bullet,
+        textX + paragraph.indent,
+        lineBaseline(cursor, line.height, edge.ascent, edge.descent)
+      );
     }
     for (const token of line.tokens) {
       ctx.font = fontOf(token.run, token.cjk);
       ctx.fillStyle = token.run.color;
-      ctx.fillText(token.text, offset, cursor);
+      const baseline = lineBaseline(cursor, line.height, token.ascent, token.descent);
+      ctx.fillText(token.text, offset, baseline);
       if (token.run.underline) {
         const size = token.run.fontSize * 96 / 72;
+        const underline = baseline + size * 0.12;
         ctx.strokeStyle = token.run.color;
         ctx.lineWidth = Math.max(1, size / 14);
         ctx.beginPath();
-        ctx.moveTo(offset, cursor + size * 0.92);
-        ctx.lineTo(offset + token.width, cursor + size * 0.92);
+        ctx.moveTo(offset, underline);
+        ctx.lineTo(offset + token.width, underline);
         ctx.stroke();
       }
       offset += token.width;
