@@ -1,0 +1,106 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <title>PPT</title>
+    <style>
+      body {
+        margin: 0;
+        background: #fff;
+        color: #00141a;
+        font:
+          14px/1.4 'Segoe UI',
+          sans-serif;
+      }
+      header {
+        display: flex;
+        gap: 8px;
+        align-items: center;
+        padding: 12px 16px;
+        background: #fff;
+        border-bottom: 1px solid rgba(0, 20, 26, 0.08);
+      }
+      button {
+        height: 32px;
+        padding: 0 14px;
+        border: 1px solid rgba(0, 20, 26, 0.08);
+        border-radius: 16px;
+        background: #fff;
+      }
+      button.primary {
+        border: none;
+        background: #00141a;
+        color: #fff;
+      }
+      button.current {
+        border-color: #14a6ea;
+      }
+      #file-name {
+        flex: 1;
+        overflow: hidden;
+        color: rgba(0, 20, 26, 0.62);
+        font-size: 13px;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      button:disabled {
+        opacity: 0.45;
+      }
+      main {
+        display: flex;
+        height: calc(100vh - 57px);
+      }
+      .stage {
+        display: flex;
+        flex: 1;
+        justify-content: center;
+        padding: 24px;
+        overflow: auto;
+        background: #f3f5f6;
+      }
+      canvas {
+        background: #fff;
+        box-shadow: 0 8px 24px rgba(0, 0, 0, 0.12);
+      }
+      aside {
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+        width: 280px;
+        padding: 16px;
+        background: #fff;
+        border-left: 1px solid rgba(0, 20, 26, 0.08);
+      }
+      textarea {
+        flex: 1;
+        padding: 8px;
+        border: 1px solid rgba(0, 20, 26, 0.08);
+        border-radius: 8px;
+        font: inherit;
+        resize: none;
+      }
+    </style>
+  </head>
+  <body>
+    <header>
+      <button id="open" type="button">打开</button>
+      <input
+        id="file"
+        type="file"
+        accept=".pptx,application/vnd.openxmlformats-officedocument.presentationml.presentation"
+        hidden
+      />
+      <div id="pages"></div>
+      <span id="file-name">点「打开」选择 pptx。这个页面读不到磁盘目录。</span>
+      <button id="save" class="primary" type="button" disabled>保存</button>
+    </header>
+    <main>
+      <div class="stage"><canvas id="slide"></canvas></div>
+      <aside>
+        <div id="shape-name">未选中形状</div>
+        <textarea id="text" disabled placeholder="选中文字形状后编辑"></textarea>
+      </aside>
+    </main>
+    <script type="module" src="./editor.js?v=5"></script>
+  </body>
+</html>

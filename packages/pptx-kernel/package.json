@@ -1,0 +1,14 @@
+{
+  "name": "@dsh/pptx-kernel",
+  "version": "0.0.0",
+  "private": true,
+  "description": "From-scratch PPTX kernel for opening and editing presentations in the browser.",
+  "type": "module",
+  "types": "./src/index.ts",
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "default": "./src/index.ts"
+    }
+  }
+}
