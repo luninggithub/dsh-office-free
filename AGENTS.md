@@ -32,6 +32,8 @@ node packages/pptx-kernel/web/server.mjs
 - A new slide is blank, appended at the end, and reuses the current slide's layout.
 - Thumbnail order, copy, and delete rewrite the slide list in the package. The last remaining slide cannot be deleted.
 - Text edits keep existing run formatting. Do not put a whole shape's text into the first run.
+- Picture and text-box moves, picture resize and crop, and shape deletion rewrite that shape in the open package.
+- The preview zoom is an explicit scale from 10% to 400%, default 100%. The wheel changes that scale only while the slide page itself is selected; otherwise it scrolls the viewport.
 
 ## 3. TypeScript
 

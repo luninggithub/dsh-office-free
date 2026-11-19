@@ -92,8 +92,21 @@
       button.thumb.current:hover canvas {
         outline: 2px solid #d24726;
       }
+      button.thumb {
+        transition: transform 80ms linear;
+      }
       button.thumb.dragging {
-        opacity: 0.55;
+        opacity: 0.35;
+      }
+      #thumb-ghost {
+        position: fixed;
+        z-index: 6;
+        pointer-events: none;
+        outline: 2px solid #14a6ea;
+        background: #fff;
+      }
+      #thumb-ghost[hidden] {
+        display: none;
       }
       button.thumb.drop-before canvas {
         box-shadow: inset 0 3px 0 #14a6ea;
@@ -162,13 +175,168 @@
       .stage {
         display: flex;
         flex: 1;
-        justify-content: center;
+        flex-direction: column;
         min-width: 0;
         height: 100%;
-        padding: 24px;
-        overflow: auto;
         background: #f3f5f6;
         box-sizing: border-box;
+      }
+      .viewport {
+        display: flex;
+        flex: 1;
+        justify-content: center;
+        min-height: 0;
+        padding: 24px;
+        overflow: auto;
+      }
+      .zoombar {
+        display: flex;
+        flex: none;
+        align-items: center;
+        justify-content: flex-end;
+        gap: 6px;
+        height: 24px;
+        padding: 0 12px;
+        border-top: 1px solid rgba(0, 20, 26, 0.08);
+        background: #fff;
+        color: #3a3a3a;
+        font-size: 12px;
+        line-height: 1;
+      }
+      .zoombar button {
+        width: 18px;
+        height: 18px;
+        padding: 0;
+        border: none;
+        border-radius: 2px;
+        background: transparent;
+        color: #3a3a3a;
+        font-size: 14px;
+        line-height: 18px;
+      }
+      .zoombar button:hover {
+        background: rgba(0, 20, 26, 0.06);
+      }
+      .zoombar input {
+        width: 108px;
+        height: 16px;
+        margin: 0;
+        padding: 0;
+        appearance: none;
+        background: transparent;
+      }
+      .zoombar input:focus-visible {
+        outline: none;
+      }
+      .zoombar input::-webkit-slider-runnable-track {
+        height: 2px;
+        border-radius: 1px;
+        background: #bdbdbd;
+      }
+      .zoombar input::-webkit-slider-thumb {
+        width: 8px;
+        height: 14px;
+        margin-top: -6px;
+        appearance: none;
+        border: 0;
+        border-radius: 1px;
+        background: #3a3a3a;
+      }
+      .zoombar input::-moz-range-track {
+        height: 2px;
+        border: 0;
+        border-radius: 1px;
+        background: #bdbdbd;
+      }
+      .zoombar input::-moz-range-thumb {
+        width: 8px;
+        height: 14px;
+        border: 0;
+        border-radius: 1px;
+        background: #3a3a3a;
+      }
+      #zoom-label {
+        min-width: 36px;
+        font-variant-numeric: tabular-nums;
+        text-align: right;
+      }
+      #handles {
+        position: absolute;
+        z-index: 2;
+        box-sizing: border-box;
+        pointer-events: none;
+      }
+      #handles[hidden] {
+        display: none;
+      }
+      #handles.cropping {
+        outline: 1px dashed #14a6ea;
+      }
+      .handle,
+      #crop-shape {
+        position: absolute;
+        pointer-events: auto;
+      }
+      .handle {
+        width: 9px;
+        height: 9px;
+        margin: 0;
+        padding: 0;
+        border: 1px solid #14a6ea;
+        border-radius: 0;
+        background: #fff;
+        transform: translate(-50%, -50%);
+      }
+      .handle[data-handle='nw'] {
+        left: 0;
+        top: 0;
+        cursor: nwse-resize;
+      }
+      .handle[data-handle='n'] {
+        left: 50%;
+        top: 0;
+        cursor: ns-resize;
+      }
+      .handle[data-handle='ne'] {
+        left: 100%;
+        top: 0;
+        cursor: nesw-resize;
+      }
+      .handle[data-handle='e'] {
+        left: 100%;
+        top: 50%;
+        cursor: ew-resize;
+      }
+      .handle[data-handle='se'] {
+        left: 100%;
+        top: 100%;
+        cursor: nwse-resize;
+      }
+      .handle[data-handle='s'] {
+        left: 50%;
+        top: 100%;
+        cursor: ns-resize;
+      }
+      .handle[data-handle='sw'] {
+        left: 0;
+        top: 100%;
+        cursor: nesw-resize;
+      }
+      .handle[data-handle='w'] {
+        left: 0;
+        top: 50%;
+        cursor: ew-resize;
+      }
+      #crop-shape {
+        top: -34px;
+        right: 0;
+        height: 26px;
+        padding: 0 8px;
+        border-radius: 6px;
+      }
+      #crop-shape[aria-pressed='true'] {
+        border-color: #14a6ea;
+        background: #e8f6fd;
       }
       .sheet {
         position: relative;
@@ -181,6 +349,9 @@
       }
       .sheet canvas {
         box-shadow: 0 8px 24px rgba(0, 0, 0, 0.12);
+      }
+      .sheet.page-selected canvas {
+        outline: 2px solid #d24726;
       }
       #editor-frame {
         position: absolute;
@@ -224,25 +395,49 @@
         </button>
       </nav>
       <div class="stage">
-        <div class="sheet" id="sheet">
-          <canvas id="slide"></canvas>
-          <div id="editor-frame" hidden>
-            <div
-              id="editor"
-              contenteditable="true"
-              spellcheck="false"
-              role="textbox"
-              aria-multiline="true"
-              aria-label="幻灯片文字"
-            ></div>
+        <div class="viewport" id="viewport">
+          <div class="sheet" id="sheet">
+            <canvas id="slide"></canvas>
+            <div id="handles" hidden>
+              <button class="handle" type="button" data-handle="nw" aria-label="左上"></button>
+              <button class="handle" type="button" data-handle="n" aria-label="上"></button>
+              <button class="handle" type="button" data-handle="ne" aria-label="右上"></button>
+              <button class="handle" type="button" data-handle="e" aria-label="右"></button>
+              <button class="handle" type="button" data-handle="se" aria-label="右下"></button>
+              <button class="handle" type="button" data-handle="s" aria-label="下"></button>
+              <button class="handle" type="button" data-handle="sw" aria-label="左下"></button>
+              <button class="handle" type="button" data-handle="w" aria-label="左"></button>
+              <button id="crop-shape" type="button" aria-pressed="false">裁剪</button>
+            </div>
+            <div id="editor-frame" hidden>
+              <div
+                id="editor"
+                contenteditable="true"
+                spellcheck="false"
+                role="textbox"
+                aria-multiline="true"
+                aria-label="幻灯片文字"
+              ></div>
+            </div>
           </div>
+        </div>
+        <div class="zoombar">
+          <button id="zoom-out" type="button" aria-label="缩小">−</button>
+          <input id="zoom" type="range" min="10" max="400" value="100" aria-label="缩放" />
+          <button id="zoom-in" type="button" aria-label="放大">+</button>
+          <span id="zoom-label">100%</span>
         </div>
       </div>
     </main>
+    <div id="thumb-ghost" hidden></div>
+    <div id="shape-menu" class="slide-menu" hidden role="menu">
+      <button id="copy-shape" type="button" role="menuitem">复制</button>
+      <button id="delete-shape" type="button" role="menuitem">删除</button>
+    </div>
     <div id="slide-menu" class="slide-menu" hidden role="menu">
       <button id="copy-slide" type="button" role="menuitem">复制</button>
       <button id="delete-slide" type="button" role="menuitem">删除</button>
     </div>
-    <script type="module" src="./editor.js?v=13"></script>
+    <script type="module" src="./editor.js?v=16"></script>
   </body>
 </html>

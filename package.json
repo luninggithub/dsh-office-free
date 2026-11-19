@@ -1,6 +1,6 @@
 {
   "name": "dsh-univer-office",
-  "version": "0.0.0",
+  "version": "0.1.1",
   "private": true,
   "description": "从零实现的浏览器 PPTX 内核：打开演示文稿、编辑文字、新增幻灯片，并覆盖保存当前文件。",
   "type": "module",

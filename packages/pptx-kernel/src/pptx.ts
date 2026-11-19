@@ -1,4 +1,12 @@
-import { EMPTY_XFRM, groupTransform, IDENTITY, mapBox, shapeXfrm, type Transform } from './geom.ts'
+import {
+  EMPTY_XFRM,
+  groupTransform,
+  IDENTITY,
+  mapBox,
+  shapeXfrm,
+  type Transform,
+  type Xfrm
+} from './geom.ts'
 import { readRelations, resolvePart, type Relation } from './rels.ts'
 import { buildSlideScene, type SlideScene } from './scene.ts'
 import {
@@ -52,6 +60,12 @@ interface SlideEntry {
   readonly relationId: string
   readonly tag: string
   readonly partName: string
+}
+
+interface LocatedShape {
+  readonly element: XmlElement
+  readonly parent: Transform
+  readonly local: Xfrm
 }
 
 /** EMU (English Metric Units) per CSS pixel at 96dpi. */
@@ -146,6 +160,109 @@ export class PptxDocument {
     paragraphs: readonly (readonly string[])[]
   ): void {
     this.writeShapeText(slideIndex, shapeId, () => paragraphs.map((runs) => [...runs]))
+  }
+
+  /**
+   * Move and resize a shape. `frame` is the axis-aligned box in slide EMU, after group scaling.
+   */
+  setShapeFrame(
+    slideIndex: number,
+    shapeId: string,
+    frame: {
+      readonly x: number
+      readonly y: number
+      readonly width: number
+      readonly height: number
+    }
+  ): void {
+    this.rewriteShape(slideIndex, shapeId, (xml, located) => {
+      const sx = located.parent.sx === 0 ? 1 : located.parent.sx
+      const sy = located.parent.sy === 0 ? 1 : located.parent.sy
+      return writeShapeBox(xml, located.element, {
+        x: Math.round((frame.x - located.parent.x) / sx),
+        y: Math.round((frame.y - located.parent.y) / sy),
+        width: Math.max(1, Math.round(frame.width / sx)),
+        height: Math.max(1, Math.round(frame.height / sy))
+      })
+    })
+  }
+
+  /** Crop a picture. Each edge is the fraction of the source image to hide, from 0 to 1. */
+  setPictureCrop(
+    slideIndex: number,
+    shapeId: string,
+    crop: {
+      readonly left: number
+      readonly top: number
+      readonly right: number
+      readonly bottom: number
+    }
+  ): void {
+    this.rewriteShape(slideIndex, shapeId, (xml, located) =>
+      writePictureCrop(xml, located.element, crop)
+    )
+  }
+
+  /** Remove one shape from a slide. Shared pictures stay in the package. */
+  deleteShape(slideIndex: number, shapeId: string): void {
+    this.rewriteShape(slideIndex, shapeId, (xml, located) => {
+      return xml.slice(0, located.element.start) + xml.slice(located.element.end)
+    })
+  }
+
+  /**
+   * Copy a shape onto `toSlide`. `dx` and `dy` are slide-EMU offsets from its current visual box.
+   * Returns the new shape id.
+   */
+  duplicateShape(
+    fromSlide: number,
+    shapeId: string,
+    toSlide: number,
+    dx: number,
+    dy: number
+  ): string {
+    const source = this.slides()[fromSlide]
+    const target = this.slides()[toSlide]
+    if (source === undefined) throw new Error(`pptx: slide ${fromSlide} does not exist`)
+    if (target === undefined) throw new Error(`pptx: slide ${toSlide} does not exist`)
+    const sourceXml = this.text(source.partName)
+    const located = locateShape(sourceXml, shapeId)
+    if (located === undefined) throw new Error(`pptx: shape ${shapeId} does not exist`)
+    const visual = mapBox(
+      located.parent,
+      located.local.x,
+      located.local.y,
+      located.local.width,
+      located.local.height
+    )
+    const targetXml = this.text(target.partName)
+    const newId = String(nextShapeId(targetXml))
+    let copy = replaceOwnId(sourceXml.slice(located.element.start, located.element.end), newId)
+    copy = writeFragmentBox(copy, {
+      x: Math.round(visual.x + dx),
+      y: Math.round(visual.y + dy),
+      width: Math.max(1, Math.round(visual.width)),
+      height: Math.max(1, Math.round(visual.height))
+    })
+    const embed = attributeValue(copy, 'embed', true)
+    if (embed !== undefined) {
+      const relation = this.slideRelations(source.partName).get(embed)
+      if (relation !== undefined) {
+        const id = this.ensureRelationship(target.partName, relation.type, relation.target)
+        copy = copy.replace(/(embed=")[^"]*(")/, `$1${id}$2`)
+      }
+    }
+    const tree = findDescendant(this.text(target.partName), 'spTree')
+    if (tree === undefined) throw new Error('pptx: slide has no shape tree')
+    const next = this.text(target.partName)
+    this.edited.set(
+      target.partName,
+      next.slice(0, tree.closeStart) + copy + next.slice(tree.closeStart)
+    )
+    this.dirty = true
+    this.scenes.delete(fromSlide)
+    this.scenes.delete(toSlide)
+    return newId
   }
 
   /**
@@ -273,6 +390,33 @@ export class PptxDocument {
     this.edited.delete(name)
     this.parts.delete(name)
     this.order = this.order.filter((item) => item !== name)
+  }
+
+  private rewriteShape(
+    slideIndex: number,
+    shapeId: string,
+    change: (xml: string, located: LocatedShape) => string
+  ): void {
+    const slide = this.slides()[slideIndex]
+    if (slide === undefined) throw new Error(`pptx: slide ${slideIndex} does not exist`)
+    const xml = this.text(slide.partName)
+    const located = locateShape(xml, shapeId)
+    if (located === undefined) throw new Error(`pptx: shape ${shapeId} does not exist`)
+    this.edited.set(slide.partName, change(xml, located))
+    this.dirty = true
+    this.scenes.delete(slideIndex)
+  }
+
+  private ensureRelationship(partName: string, type: string, target: string): string {
+    const relsName = slideRelsName(partName)
+    const xml = this.optionalText(relsName) ?? slideRelationships(undefined)
+    const relations = readRelations(xml)
+    for (const [id, relation] of relations) {
+      if (relation.type === type && relation.target === target) return id
+    }
+    const id = nextRelationId(relations)
+    this.remember(relsName, insertRelationship(xml, id, target, type))
+    return id
   }
 
   private slideEntries(): SlideEntry[] {
@@ -634,6 +778,136 @@ function blankSlide(): string {
 </p:sld>`
 }
 
+function locateShape(xml: string, shapeId: string): LocatedShape | undefined {
+  const tree = findDescendant(xml, 'spTree')
+  if (tree === undefined) return undefined
+  return walkShapes(xml, tree.openEnd, tree.closeStart, shapeId, IDENTITY)
+}
+
+function walkShapes(
+  xml: string,
+  from: number,
+  to: number,
+  shapeId: string,
+  parent: Transform
+): LocatedShape | undefined {
+  for (const element of childElements(xml, from, to)) {
+    if (element.name === 'grpSp') {
+      const found = walkShapes(
+        xml,
+        element.openEnd,
+        element.closeStart,
+        shapeId,
+        groupTransform(parent, shapeXfrm(xml, element) ?? EMPTY_XFRM)
+      )
+      if (found !== undefined) return found
+      continue
+    }
+    if (
+      (element.name === 'sp' || element.name === 'pic') &&
+      readShapeId(xml, element) === shapeId
+    ) {
+      return { element, parent, local: shapeXfrm(xml, element) ?? EMPTY_XFRM }
+    }
+  }
+  return undefined
+}
+
+function xfrmElement(xml: string, element: XmlElement): XmlElement | undefined {
+  const children = childElements(xml, element.openEnd, element.closeStart)
+  const props = children.find((item) => item.name === 'spPr' || item.name === 'grpSpPr')
+  if (props !== undefined) return findDescendant(xml, 'xfrm', props.openEnd, props.closeStart)
+  return children.find((item) => item.name === 'xfrm')
+}
+
+function writeShapeBox(
+  xml: string,
+  element: XmlElement,
+  box: { readonly x: number; readonly y: number; readonly width: number; readonly height: number }
+): string {
+  const xfrm = xfrmElement(xml, element)
+  const off = `<a:off x="${box.x}" y="${box.y}"/>`
+  const ext = `<a:ext cx="${box.width}" cy="${box.height}"/>`
+  if (xfrm === undefined) {
+    const props = childElements(xml, element.openEnd, element.closeStart).find(
+      (item) => item.name === 'spPr'
+    )
+    const tag = `<a:xfrm>${off}${ext}</a:xfrm>`
+    const at = props?.openEnd ?? element.closeStart
+    return xml.slice(0, at) + tag + xml.slice(at)
+  }
+  if (xfrm.openEnd === xfrm.end) {
+    return xml.slice(0, xfrm.start) + `<a:xfrm>${off}${ext}</a:xfrm>` + xml.slice(xfrm.end)
+  }
+  const children = childElements(xml, xfrm.openEnd, xfrm.closeStart)
+  const parts: string[] = []
+  let wroteOff = false
+  let wroteExt = false
+  for (const child of children) {
+    if (child.name === 'off') {
+      parts.push(off)
+      wroteOff = true
+      continue
+    }
+    if (child.name === 'ext') {
+      parts.push(ext)
+      wroteExt = true
+      continue
+    }
+    parts.push(xml.slice(child.start, child.end))
+  }
+  if (!wroteOff) parts.unshift(off)
+  if (!wroteExt) parts.splice(1, 0, ext)
+  return xml.slice(0, xfrm.openEnd) + parts.join('') + xml.slice(xfrm.closeStart)
+}
+
+function writeFragmentBox(
+  fragment: string,
+  box: { readonly x: number; readonly y: number; readonly width: number; readonly height: number }
+): string {
+  const root = childElements(fragment)[0]
+  if (root === undefined) return fragment
+  return writeShapeBox(fragment, root, box)
+}
+
+function writePictureCrop(
+  xml: string,
+  element: XmlElement,
+  crop: {
+    readonly left: number
+    readonly top: number
+    readonly right: number
+    readonly bottom: number
+  }
+): string {
+  const fill = childElements(xml, element.openEnd, element.closeStart).find(
+    (item) => item.name === 'blipFill'
+  )
+  if (fill === undefined) throw new Error('pptx: shape has no picture')
+  const tag = `<a:srcRect l="${cropEdge(crop.left)}" t="${cropEdge(crop.top)}" r="${cropEdge(crop.right)}" b="${cropEdge(crop.bottom)}"/>`
+  const existing = childElements(xml, fill.openEnd, fill.closeStart).find(
+    (item) => item.name === 'srcRect'
+  )
+  if (existing !== undefined) return xml.slice(0, existing.start) + tag + xml.slice(existing.end)
+  return xml.slice(0, fill.closeStart) + tag + xml.slice(fill.closeStart)
+}
+
+function cropEdge(value: number): number {
+  return Math.round(Math.min(0.9, Math.max(0, value)) * 100000)
+}
+
+function replaceOwnId(fragment: string, id: string): string {
+  return fragment.replace(/(<[^>]*\bcNvPr\b[^>]*\bid=")[^"]*(")/, `$1${id}$2`)
+}
+
+function nextShapeId(xml: string): number {
+  let max = 1
+  for (const match of xml.matchAll(/<[^>]*\bcNvPr\b[^>]*\bid="(\d+)"/g)) {
+    max = Math.max(max, Number(match[1] ?? 0))
+  }
+  return max + 1
+}
+
 function slideRelsName(partName: string): string {
   const slash = partName.lastIndexOf('/')
   return `${partName.slice(0, slash)}/_rels/${partName.slice(slash + 1)}.rels`
@@ -719,8 +993,13 @@ function relationPrefix(presentation: string): string {
   return 'r'
 }
 
-function insertRelationship(xml: string, id: string, target: string): string {
-  const tag = `<Relationship Id="${id}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide" Target="${escapeXml(target)}"/>`
+function insertRelationship(
+  xml: string,
+  id: string,
+  target: string,
+  type = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide'
+): string {
+  const tag = `<Relationship Id="${id}" Type="${escapeXml(type)}" Target="${escapeXml(target)}"/>`
   const close = xml.lastIndexOf('</Relationships>')
   if (close < 0) throw new Error('pptx: presentation relationships are missing')
   return xml.slice(0, close) + tag + xml.slice(close)

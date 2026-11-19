@@ -143,6 +143,41 @@ describe('pptx kernel', () => {
     expect(() => opened.deleteSlide(3)).toThrow(/does not exist/)
   })
 
+  it('moves, crops, duplicates, and deletes a picture', async () => {
+    const opened = await openPptx(await sample())
+    opened.setShapeFrame(0, '3', { x: 900, y: 1000, width: 400, height: 500 })
+    expect(opened.slides()[0]?.shapes.find((shape) => shape.id === '3')).toMatchObject({
+      kind: 'picture',
+      x: 900,
+      y: 1000,
+      width: 400,
+      height: 500
+    })
+    opened.setPictureCrop(0, '3', { left: 0.1, top: 0.2, right: 0.3, bottom: 0 })
+    expect(opened.scene(0).shapes.find((shape) => shape.id === '3')?.fill).toMatchObject({
+      kind: 'picture',
+      crop: { left: 0.1, top: 0.2, right: 0.3, bottom: 0 }
+    })
+    opened.setShapeFrame(0, '5', { x: 1100, y: 1200, width: 10, height: 20 })
+    expect(opened.slides()[0]?.shapes.find((shape) => shape.id === '5')).toMatchObject({
+      x: 1100,
+      y: 1200,
+      width: 10,
+      height: 20
+    })
+    const copied = opened.duplicateShape(0, '3', 1, 0, 0)
+    expect(opened.slides()[1]?.shapes.find((shape) => shape.id === copied)).toMatchObject({
+      kind: 'picture',
+      imagePath: 'ppt/media/image1.png'
+    })
+    opened.deleteShape(0, '3')
+    expect(opened.slides()[0]?.shapes.find((shape) => shape.id === '3')).toBeUndefined()
+    expect(opened.slides()[0]?.shapes.find((shape) => shape.id === '2')?.text).toBe('Hello & more')
+    const saved = await openPptx(await opened.save())
+    expect(saved.part('ppt/media/image1.png')).toEqual(PNG)
+    expect(saved.slides()[1]?.shapes.find((shape) => shape.id === copied)?.kind).toBe('picture')
+  })
+
   it('rejects a picture edit and a missing shape', async () => {
     const opened = await openPptx(await sample())
     expect(() => opened.setShapeText(0, '3', 'nope')).toThrow(/no text/)

@@ -1756,6 +1756,83 @@ var PptxDocument = class _PptxDocument {
     this.writeShapeText(slideIndex, shapeId, () => paragraphs2.map((runs) => [...runs]));
   }
   /**
+   * Move and resize a shape. `frame` is the axis-aligned box in slide EMU, after group scaling.
+   */
+  setShapeFrame(slideIndex, shapeId, frame) {
+    this.rewriteShape(slideIndex, shapeId, (xml, located) => {
+      const sx = located.parent.sx === 0 ? 1 : located.parent.sx;
+      const sy = located.parent.sy === 0 ? 1 : located.parent.sy;
+      return writeShapeBox(xml, located.element, {
+        x: Math.round((frame.x - located.parent.x) / sx),
+        y: Math.round((frame.y - located.parent.y) / sy),
+        width: Math.max(1, Math.round(frame.width / sx)),
+        height: Math.max(1, Math.round(frame.height / sy))
+      });
+    });
+  }
+  /** Crop a picture. Each edge is the fraction of the source image to hide, from 0 to 1. */
+  setPictureCrop(slideIndex, shapeId, crop) {
+    this.rewriteShape(
+      slideIndex,
+      shapeId,
+      (xml, located) => writePictureCrop(xml, located.element, crop)
+    );
+  }
+  /** Remove one shape from a slide. Shared pictures stay in the package. */
+  deleteShape(slideIndex, shapeId) {
+    this.rewriteShape(slideIndex, shapeId, (xml, located) => {
+      return xml.slice(0, located.element.start) + xml.slice(located.element.end);
+    });
+  }
+  /**
+   * Copy a shape onto `toSlide`. `dx` and `dy` are slide-EMU offsets from its current visual box.
+   * Returns the new shape id.
+   */
+  duplicateShape(fromSlide, shapeId, toSlide, dx, dy) {
+    const source = this.slides()[fromSlide];
+    const target = this.slides()[toSlide];
+    if (source === void 0) throw new Error(`pptx: slide ${fromSlide} does not exist`);
+    if (target === void 0) throw new Error(`pptx: slide ${toSlide} does not exist`);
+    const sourceXml = this.text(source.partName);
+    const located = locateShape(sourceXml, shapeId);
+    if (located === void 0) throw new Error(`pptx: shape ${shapeId} does not exist`);
+    const visual = mapBox(
+      located.parent,
+      located.local.x,
+      located.local.y,
+      located.local.width,
+      located.local.height
+    );
+    const targetXml = this.text(target.partName);
+    const newId = String(nextShapeId(targetXml));
+    let copy = replaceOwnId(sourceXml.slice(located.element.start, located.element.end), newId);
+    copy = writeFragmentBox(copy, {
+      x: Math.round(visual.x + dx),
+      y: Math.round(visual.y + dy),
+      width: Math.max(1, Math.round(visual.width)),
+      height: Math.max(1, Math.round(visual.height))
+    });
+    const embed = attributeValue(copy, "embed", true);
+    if (embed !== void 0) {
+      const relation = this.slideRelations(source.partName).get(embed);
+      if (relation !== void 0) {
+        const id = this.ensureRelationship(target.partName, relation.type, relation.target);
+        copy = copy.replace(/(embed=")[^"]*(")/, `$1${id}$2`);
+      }
+    }
+    const tree = findDescendant(this.text(target.partName), "spTree");
+    if (tree === void 0) throw new Error("pptx: slide has no shape tree");
+    const next = this.text(target.partName);
+    this.edited.set(
+      target.partName,
+      next.slice(0, tree.closeStart) + copy + next.slice(tree.closeStart)
+    );
+    this.dirty = true;
+    this.scenes.delete(fromSlide);
+    this.scenes.delete(toSlide);
+    return newId;
+  }
+  /**
    * Append a blank slide, using the layout of `layoutFromIndex` so the deck template stays
    * in effect. Returns the new slide index.
    */
@@ -1867,6 +1944,27 @@ var PptxDocument = class _PptxDocument {
     this.edited.delete(name);
     this.parts.delete(name);
     this.order = this.order.filter((item) => item !== name);
+  }
+  rewriteShape(slideIndex, shapeId, change) {
+    const slide = this.slides()[slideIndex];
+    if (slide === void 0) throw new Error(`pptx: slide ${slideIndex} does not exist`);
+    const xml = this.text(slide.partName);
+    const located = locateShape(xml, shapeId);
+    if (located === void 0) throw new Error(`pptx: shape ${shapeId} does not exist`);
+    this.edited.set(slide.partName, change(xml, located));
+    this.dirty = true;
+    this.scenes.delete(slideIndex);
+  }
+  ensureRelationship(partName, type, target) {
+    const relsName = slideRelsName(partName);
+    const xml = this.optionalText(relsName) ?? slideRelationships(void 0);
+    const relations = readRelations(xml);
+    for (const [id2, relation] of relations) {
+      if (relation.type === type && relation.target === target) return id2;
+    }
+    const id = nextRelationId(relations);
+    this.remember(relsName, insertRelationship(xml, id, target, type));
+    return id;
   }
   slideEntries() {
     const presentation = this.text("ppt/presentation.xml");
@@ -2172,6 +2270,102 @@ function blankSlide() {
 <p:clrMapOvr><a:masterClrMapping/></p:clrMapOvr>
 </p:sld>`;
 }
+function locateShape(xml, shapeId) {
+  const tree = findDescendant(xml, "spTree");
+  if (tree === void 0) return void 0;
+  return walkShapes(xml, tree.openEnd, tree.closeStart, shapeId, IDENTITY);
+}
+function walkShapes(xml, from, to, shapeId, parent) {
+  for (const element of childElements(xml, from, to)) {
+    if (element.name === "grpSp") {
+      const found = walkShapes(
+        xml,
+        element.openEnd,
+        element.closeStart,
+        shapeId,
+        groupTransform(parent, shapeXfrm(xml, element) ?? EMPTY_XFRM)
+      );
+      if (found !== void 0) return found;
+      continue;
+    }
+    if ((element.name === "sp" || element.name === "pic") && readShapeId(xml, element) === shapeId) {
+      return { element, parent, local: shapeXfrm(xml, element) ?? EMPTY_XFRM };
+    }
+  }
+  return void 0;
+}
+function xfrmElement(xml, element) {
+  const children = childElements(xml, element.openEnd, element.closeStart);
+  const props = children.find((item) => item.name === "spPr" || item.name === "grpSpPr");
+  if (props !== void 0) return findDescendant(xml, "xfrm", props.openEnd, props.closeStart);
+  return children.find((item) => item.name === "xfrm");
+}
+function writeShapeBox(xml, element, box) {
+  const xfrm = xfrmElement(xml, element);
+  const off = `<a:off x="${box.x}" y="${box.y}"/>`;
+  const ext = `<a:ext cx="${box.width}" cy="${box.height}"/>`;
+  if (xfrm === void 0) {
+    const props = childElements(xml, element.openEnd, element.closeStart).find(
+      (item) => item.name === "spPr"
+    );
+    const tag = `<a:xfrm>${off}${ext}</a:xfrm>`;
+    const at = props?.openEnd ?? element.closeStart;
+    return xml.slice(0, at) + tag + xml.slice(at);
+  }
+  if (xfrm.openEnd === xfrm.end) {
+    return xml.slice(0, xfrm.start) + `<a:xfrm>${off}${ext}</a:xfrm>` + xml.slice(xfrm.end);
+  }
+  const children = childElements(xml, xfrm.openEnd, xfrm.closeStart);
+  const parts = [];
+  let wroteOff = false;
+  let wroteExt = false;
+  for (const child of children) {
+    if (child.name === "off") {
+      parts.push(off);
+      wroteOff = true;
+      continue;
+    }
+    if (child.name === "ext") {
+      parts.push(ext);
+      wroteExt = true;
+      continue;
+    }
+    parts.push(xml.slice(child.start, child.end));
+  }
+  if (!wroteOff) parts.unshift(off);
+  if (!wroteExt) parts.splice(1, 0, ext);
+  return xml.slice(0, xfrm.openEnd) + parts.join("") + xml.slice(xfrm.closeStart);
+}
+function writeFragmentBox(fragment, box) {
+  const root = childElements(fragment)[0];
+  if (root === void 0) return fragment;
+  return writeShapeBox(fragment, root, box);
+}
+function writePictureCrop(xml, element, crop) {
+  const fill = childElements(xml, element.openEnd, element.closeStart).find(
+    (item) => item.name === "blipFill"
+  );
+  if (fill === void 0) throw new Error("pptx: shape has no picture");
+  const tag = `<a:srcRect l="${cropEdge(crop.left)}" t="${cropEdge(crop.top)}" r="${cropEdge(crop.right)}" b="${cropEdge(crop.bottom)}"/>`;
+  const existing = childElements(xml, fill.openEnd, fill.closeStart).find(
+    (item) => item.name === "srcRect"
+  );
+  if (existing !== void 0) return xml.slice(0, existing.start) + tag + xml.slice(existing.end);
+  return xml.slice(0, fill.closeStart) + tag + xml.slice(fill.closeStart);
+}
+function cropEdge(value) {
+  return Math.round(Math.min(0.9, Math.max(0, value)) * 1e5);
+}
+function replaceOwnId(fragment, id) {
+  return fragment.replace(/(<[^>]*\bcNvPr\b[^>]*\bid=")[^"]*(")/, `$1${id}$2`);
+}
+function nextShapeId(xml) {
+  let max = 1;
+  for (const match of xml.matchAll(/<[^>]*\bcNvPr\b[^>]*\bid="(\d+)"/g)) {
+    max = Math.max(max, Number(match[1] ?? 0));
+  }
+  return max + 1;
+}
 function slideRelsName(partName) {
   const slash = partName.lastIndexOf("/");
   return `${partName.slice(0, slash)}/_rels/${partName.slice(slash + 1)}.rels`;
@@ -2246,8 +2440,8 @@ function relationPrefix(presentation) {
   }
   return "r";
 }
-function insertRelationship(xml, id, target) {
-  const tag = `<Relationship Id="${id}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide" Target="${escapeXml(target)}"/>`;
+function insertRelationship(xml, id, target, type = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide") {
+  const tag = `<Relationship Id="${id}" Type="${escapeXml(type)}" Target="${escapeXml(target)}"/>`;
   const close = xml.lastIndexOf("</Relationships>");
   if (close < 0) throw new Error("pptx: presentation relationships are missing");
   return xml.slice(0, close) + tag + xml.slice(close);
@@ -2299,13 +2493,20 @@ var page = {
   dirty: false,
   label: "",
   servedName: null,
-  handle: null
+  handle: null,
+  zoom: 1,
+  pageSelected: false,
+  cropping: false,
+  live: void 0,
+  clip: null,
+  pasteCount: 0
 };
 var pressing = false;
 var painting = false;
 var plainOpen = readPlainOpen();
 var menuIndex = -1;
 var drag = null;
+var shapeGesture = null;
 var openButton = document.querySelector("#open");
 var fileInput = document.querySelector("#file");
 var fileName = document.querySelector("#file-name");
@@ -2316,8 +2517,19 @@ var thumbs = document.querySelector("#thumbs");
 var slideMenu = document.querySelector("#slide-menu");
 var copySlideButton = document.querySelector("#copy-slide");
 var deleteSlideButton = document.querySelector("#delete-slide");
+var viewport = document.querySelector("#viewport");
 var sheet = document.querySelector("#sheet");
 var canvas = document.querySelector("#slide");
+var handles = document.querySelector("#handles");
+var cropButton = document.querySelector("#crop-shape");
+var shapeMenu = document.querySelector("#shape-menu");
+var copyShapeButton = document.querySelector("#copy-shape");
+var deleteShapeButton = document.querySelector("#delete-shape");
+var zoomInput = document.querySelector("#zoom");
+var zoomOut = document.querySelector("#zoom-out");
+var zoomIn = document.querySelector("#zoom-in");
+var zoomLabel = document.querySelector("#zoom-label");
+var thumbGhost = document.querySelector("#thumb-ghost");
 var editorFrame = document.querySelector("#editor-frame");
 var editor = document.querySelector("#editor");
 var context = canvas?.getContext("2d");
@@ -2350,35 +2562,175 @@ deleteSlideButton?.addEventListener("click", () => {
   deleteAt(index);
 });
 document.addEventListener("pointerdown", (event) => {
-  if (slideMenu === null || slideMenu.hidden) return;
-  if (event.target instanceof Node && slideMenu.contains(event.target)) return;
-  hideMenu();
+  if (!(event.target instanceof Node)) return;
+  if (slideMenu !== null && !slideMenu.hidden && !slideMenu.contains(event.target)) hideMenu();
+  if (shapeMenu !== null && !shapeMenu.hidden && !shapeMenu.contains(event.target)) hideShapeMenu();
 });
 window.addEventListener("keydown", (event) => {
-  if (event.key === "Escape") hideMenu();
+  if (event.key === "Escape") {
+    hideMenu();
+    hideShapeMenu();
+    if (page.cropping) {
+      page.cropping = false;
+      render();
+    }
+    return;
+  }
+  if (typingTarget()) return;
+  if (event.key === "Delete" || event.key === "Backspace") {
+    event.preventDefault();
+    deleteSelectedShape();
+    return;
+  }
+  if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "c") {
+    if (copySelectedPicture()) event.preventDefault();
+    return;
+  }
+  if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "v") {
+    event.preventDefault();
+    pastePicture();
+  }
+});
+copyShapeButton?.addEventListener("click", () => {
+  copySelectedPicture();
+  hideShapeMenu();
+});
+deleteShapeButton?.addEventListener("click", () => {
+  hideShapeMenu();
+  deleteSelectedShape();
+});
+cropButton?.addEventListener("click", () => {
+  page.cropping = !page.cropping;
+  render();
+});
+zoomInput?.addEventListener("input", () => {
+  setZoom(Number(zoomInput.value) / 100);
+});
+zoomOut?.addEventListener("click", () => {
+  setZoom((Math.round(page.zoom * 100) - 10) / 100);
+});
+zoomIn?.addEventListener("click", () => {
+  setZoom((Math.round(page.zoom * 100) + 10) / 100);
+});
+viewport?.addEventListener(
+  "wheel",
+  (event) => {
+    if (page.doc === null || !page.pageSelected) return;
+    event.preventDefault();
+    setZoom(page.zoom * (event.deltaY < 0 ? 1.08 : 1 / 1.08));
+  },
+  { passive: false }
+);
+viewport?.addEventListener("pointerdown", (event) => {
+  if (event.button !== 0 || event.target !== viewport) return;
+  if (!page.pageSelected && page.selectedId === void 0 && !page.editing) return;
+  page.pageSelected = false;
+  page.selectedId = void 0;
+  page.editing = false;
+  page.cropping = false;
+  page.live = void 0;
+  render();
 });
 thumbs?.addEventListener("scroll", () => {
   hideMenu();
 });
 sheet?.addEventListener("pointerdown", (event) => {
   if (event.button !== 0 || canvas === null || !(event.target instanceof Node)) return;
+  if (event.target instanceof Element && event.target.closest("#handles, #shape-menu")) return;
   pressing = true;
   const box = canvas.getBoundingClientRect();
   const shape = hitTest(event.clientX - box.left, event.clientY - box.top);
   const sameText = page.editing && shape?.id === page.selectedId && editor !== null && (event.target === editor || editor.contains(event.target));
   if (sameText) return;
   event.preventDefault();
-  page.selectedId = shape?.id;
-  page.editing = shape?.editable === true;
+  const previous = page.selectedId;
+  const content = shape !== void 0 && isContent(shape);
+  page.pageSelected = !content;
+  page.selectedId = content ? shape.id : void 0;
+  page.editing = false;
+  page.cropping = content && shape.fill.kind === "picture" && shape.id === previous && page.cropping;
+  if (content) {
+    const shown = shownShape(shape);
+    shapeGesture = {
+      kind: "pending",
+      id: shape.id,
+      pointerId: event.pointerId,
+      startClientX: event.clientX,
+      startClientY: event.clientY,
+      origin: shapeBox(shown),
+      handle: "",
+      crop: pictureCrop(shown),
+      moved: false
+    };
+    canvas.setPointerCapture(event.pointerId);
+  }
   render();
-  if (shape?.editable === true) placeCaret(event.clientX, event.clientY);
+});
+sheet?.addEventListener("dblclick", (event) => {
+  if (canvas === null || !(event.target instanceof Node)) return;
+  if (editor !== null && editor.contains(event.target)) return;
+  const box = canvas.getBoundingClientRect();
+  const shape = hitTest(event.clientX - box.left, event.clientY - box.top);
+  if (shape?.editable !== true) return;
+  page.pageSelected = false;
+  page.selectedId = shape.id;
+  page.editing = true;
+  page.cropping = false;
+  render();
+  placeCaret(event.clientX, event.clientY);
+});
+sheet?.addEventListener("contextmenu", (event) => {
+  if (canvas === null) return;
+  const box = canvas.getBoundingClientRect();
+  const shape = hitTest(event.clientX - box.left, event.clientY - box.top);
+  if (shape === void 0 || !canMove(shape)) return;
+  if (!isContent(shape)) {
+    event.preventDefault();
+    page.pageSelected = true;
+    page.selectedId = void 0;
+    page.editing = false;
+    render();
+    return;
+  }
+  event.preventDefault();
+  page.pageSelected = false;
+  page.selectedId = shape.id;
+  page.editing = false;
+  render();
+  openShapeMenu(shape, event.clientX, event.clientY);
+});
+handles?.addEventListener("pointerdown", (event) => {
+  if (event.button !== 0 || canvas === null) return;
+  const handle = event.target instanceof Element ? event.target.closest("[data-handle]") : null;
+  if (handle === null) return;
+  const shape = selected();
+  if (shape === void 0 || shape.fill.kind !== "picture") return;
+  event.preventDefault();
+  event.stopPropagation();
+  const shown = shownShape(shape);
+  shapeGesture = {
+    kind: page.cropping ? "crop" : "resize",
+    id: shape.id,
+    pointerId: event.pointerId,
+    startClientX: event.clientX,
+    startClientY: event.clientY,
+    origin: shapeBox(shown),
+    handle: handle.dataset.handle ?? "se",
+    crop: pictureCrop(shown),
+    moved: true
+  };
+  handle.setPointerCapture(event.pointerId);
 });
 sheet?.addEventListener("mousedown", (event) => {
   if (event.button !== 0 || !(event.target instanceof Node)) return;
   if (editor !== null && (event.target === editor || editor.contains(event.target))) return;
   event.preventDefault();
 });
-window.addEventListener("pointerup", () => {
+window.addEventListener("pointermove", (event) => {
+  moveShapeGesture(event);
+});
+window.addEventListener("pointerup", (event) => {
+  finishShapeGesture(event);
   if (!pressing) return;
   pressing = false;
   if (page.editing && editor !== null && document.activeElement !== editor) editor.focus();
@@ -2388,6 +2740,11 @@ window.addEventListener("pointercancel", () => {
 });
 canvas?.addEventListener("mousemove", (event) => {
   const shape = hitTest(event.offsetX, event.offsetY);
+  const selectedShape = selected();
+  if (shape !== void 0 && selectedShape !== void 0 && shape.id === selectedShape.id && canMove(shape) && !page.editing) {
+    canvas.style.cursor = "move";
+    return;
+  }
   canvas.style.cursor = shape?.editable === true ? "text" : "default";
 });
 editor?.addEventListener("input", (event) => {
@@ -2553,9 +2910,14 @@ async function openBytes(bytes, label) {
   page.label = label;
   page.slideIndex = 0;
   page.selectedId = void 0;
+  page.pageSelected = false;
   page.editing = false;
   page.editorShape = void 0;
   page.thumbIndex = -1;
+  page.cropping = false;
+  page.live = void 0;
+  page.clip = null;
+  setZoom(1, false);
   page.images.clear();
   clearDirty();
   if (saveButton !== null) saveButton.disabled = false;
@@ -2615,6 +2977,7 @@ async function discardEdits() {
   page.doc = await openPptx(page.saved.slice());
   page.slideIndex = Math.min(index, Math.max(page.doc.slides().length - 1, 0));
   page.selectedId = void 0;
+  page.pageSelected = false;
   page.editing = false;
   page.editorShape = void 0;
   page.thumbIndex = -1;
@@ -2646,6 +3009,7 @@ function deleteAt(index) {
 }
 function finishStructureChange() {
   page.selectedId = void 0;
+  page.pageSelected = false;
   page.editing = false;
   page.editorShape = void 0;
   page.thumbIndex = -1;
@@ -2657,6 +3021,7 @@ function selectSlide(index) {
   if (page.doc?.slides()[index] === void 0) return;
   page.slideIndex = index;
   page.selectedId = void 0;
+  page.pageSelected = false;
   page.editing = false;
   page.editorShape = void 0;
   if (document.activeElement === editor) editor?.blur();
@@ -2908,6 +3273,244 @@ function insertPlain(value) {
   selection.addRange(range);
   editor.dispatchEvent(new Event("input", { bubbles: true }));
 }
+function typingTarget() {
+  const node = document.activeElement;
+  return node === editor || node instanceof HTMLInputElement || node instanceof HTMLTextAreaElement;
+}
+function setZoom(next, paint = true) {
+  page.zoom = Math.min(4, Math.max(0.1, next));
+  const percent = Math.round(page.zoom * 100);
+  if (zoomInput !== null) zoomInput.value = String(percent);
+  if (zoomLabel !== null) zoomLabel.textContent = `${percent}%`;
+  if (zoomOut !== null) zoomOut.disabled = percent <= 10;
+  if (zoomIn !== null) zoomIn.disabled = percent >= 400;
+  if (paint && page.doc !== null) render();
+}
+function canMove(shape) {
+  return shape.selectable && (shape.fill.kind === "picture" || shape.editable);
+}
+function isContent(shape) {
+  return canMove(shape) && (shape.fill.kind === "picture" || shape.plain.length > 0);
+}
+function shapeBox(shape) {
+  return {
+    x: shape.x / EMU_PER_PIXEL,
+    y: shape.y / EMU_PER_PIXEL,
+    width: shape.width / EMU_PER_PIXEL,
+    height: shape.height / EMU_PER_PIXEL
+  };
+}
+function pictureCrop(shape) {
+  if (shape.fill.kind !== "picture" || shape.fill.crop === void 0) {
+    return { left: 0, top: 0, right: 0, bottom: 0 };
+  }
+  return { ...shape.fill.crop };
+}
+function shownShape(shape) {
+  const live = page.live;
+  if (live === void 0 || live.id !== shape.id) return shape;
+  const framed = {
+    ...shape,
+    x: live.box.x * EMU_PER_PIXEL,
+    y: live.box.y * EMU_PER_PIXEL,
+    width: live.box.width * EMU_PER_PIXEL,
+    height: live.box.height * EMU_PER_PIXEL
+  };
+  if (live.crop === void 0 || shape.fill.kind !== "picture") return framed;
+  return { ...framed, fill: { kind: "picture", imagePath: shape.fill.imagePath, crop: live.crop } };
+}
+function moveShapeGesture(event) {
+  const gesture = shapeGesture;
+  if (gesture === null || event.pointerId !== gesture.pointerId) return;
+  const dx = (event.clientX - gesture.startClientX) / page.zoom;
+  const dy = (event.clientY - gesture.startClientY) / page.zoom;
+  if (gesture.kind === "pending") {
+    if (Math.hypot(dx, dy) < 4) return;
+    gesture.kind = "move";
+    gesture.moved = true;
+    page.editing = false;
+  }
+  if (gesture.kind === "move") {
+    page.live = {
+      id: gesture.id,
+      box: {
+        x: gesture.origin.x + dx,
+        y: gesture.origin.y + dy,
+        width: gesture.origin.width,
+        height: gesture.origin.height
+      }
+    };
+  } else if (gesture.kind === "resize") {
+    page.live = { id: gesture.id, box: resizeBox(gesture.origin, gesture.handle, dx, dy) };
+  } else if (gesture.kind === "crop") {
+    page.live = {
+      id: gesture.id,
+      box: gesture.origin,
+      crop: cropFromPointer(
+        gesture.origin,
+        gesture.crop,
+        gesture.handle,
+        event.clientX,
+        event.clientY
+      )
+    };
+  }
+  render();
+}
+function finishShapeGesture(event) {
+  const gesture = shapeGesture;
+  if (gesture === null || event.pointerId !== gesture.pointerId) return;
+  shapeGesture = null;
+  const live = page.live;
+  page.live = void 0;
+  const doc = page.doc;
+  if (doc === null || gesture.kind === "pending" || live === void 0) {
+    render();
+    return;
+  }
+  if (gesture.kind === "crop" && live.crop !== void 0) {
+    doc.setPictureCrop(page.slideIndex, gesture.id, live.crop);
+  } else {
+    doc.setShapeFrame(page.slideIndex, gesture.id, {
+      x: live.box.x * EMU_PER_PIXEL,
+      y: live.box.y * EMU_PER_PIXEL,
+      width: live.box.width * EMU_PER_PIXEL,
+      height: live.box.height * EMU_PER_PIXEL
+    });
+  }
+  markDirty();
+  render();
+}
+function resizeBox(origin, handle, dx, dy) {
+  const min = 8;
+  let left = origin.x;
+  let right = origin.x + origin.width;
+  let top = origin.y;
+  let bottom = origin.y + origin.height;
+  if (handle.includes("w")) left = Math.min(origin.x + dx, right - min);
+  if (handle.includes("e")) right = Math.max(origin.x + origin.width + dx, left + min);
+  if (handle.includes("n")) top = Math.min(origin.y + dy, bottom - min);
+  if (handle.includes("s")) bottom = Math.max(origin.y + origin.height + dy, top + min);
+  return {
+    x: left,
+    y: top,
+    width: Math.max(min, right - left),
+    height: Math.max(min, bottom - top)
+  };
+}
+function cropFromPointer(origin, start, handle, clientX, clientY) {
+  const point = slidePoint(clientX, clientY);
+  const crop = { ...start };
+  const remain = 0.08;
+  if (handle.includes("w")) {
+    crop.left = clamp((point.x - origin.x) / origin.width, 0, 1 - start.right - remain);
+  }
+  if (handle.includes("e")) {
+    crop.right = clamp(
+      (origin.x + origin.width - point.x) / origin.width,
+      0,
+      1 - start.left - remain
+    );
+  }
+  if (handle.includes("n")) {
+    crop.top = clamp((point.y - origin.y) / origin.height, 0, 1 - start.bottom - remain);
+  }
+  if (handle.includes("s")) {
+    crop.bottom = clamp(
+      (origin.y + origin.height - point.y) / origin.height,
+      0,
+      1 - start.top - remain
+    );
+  }
+  return crop;
+}
+function slidePoint(clientX, clientY) {
+  const rect = canvas?.getBoundingClientRect();
+  return {
+    x: (clientX - (rect?.left ?? 0)) / page.zoom,
+    y: (clientY - (rect?.top ?? 0)) / page.zoom
+  };
+}
+function clamp(value, min, max) {
+  return Math.min(max, Math.max(min, value));
+}
+function syncHandles(shape) {
+  if (handles === null) return;
+  if (shape === void 0 || shape.fill.kind !== "picture" || page.editing) {
+    handles.hidden = true;
+    return;
+  }
+  const box = shapeBox(shape);
+  handles.hidden = false;
+  handles.classList.toggle("cropping", page.cropping);
+  handles.style.left = `${box.x * page.zoom}px`;
+  handles.style.top = `${box.y * page.zoom}px`;
+  handles.style.width = `${box.width * page.zoom}px`;
+  handles.style.height = `${box.height * page.zoom}px`;
+  cropButton?.setAttribute("aria-pressed", page.cropping ? "true" : "false");
+}
+function openShapeMenu(shape, clientX, clientY) {
+  if (shapeMenu === null) return;
+  if (copyShapeButton !== null) copyShapeButton.hidden = shape.fill.kind !== "picture";
+  shapeMenu.hidden = false;
+  const width = shapeMenu.offsetWidth;
+  const height = shapeMenu.offsetHeight;
+  shapeMenu.style.left = `${Math.min(clientX, Math.max(8, window.innerWidth - width - 8))}px`;
+  shapeMenu.style.top = `${Math.min(clientY, Math.max(8, window.innerHeight - height - 8))}px`;
+}
+function hideShapeMenu() {
+  if (shapeMenu === null) return;
+  shapeMenu.hidden = true;
+}
+function deleteSelectedShape() {
+  const doc = page.doc;
+  const shape = selected();
+  if (doc === null || shape === void 0 || !canMove(shape)) return;
+  doc.deleteShape(page.slideIndex, shape.id);
+  page.selectedId = void 0;
+  page.editing = false;
+  page.cropping = false;
+  page.live = void 0;
+  markDirty();
+  render();
+}
+function copySelectedPicture() {
+  const shape = selected();
+  if (shape === void 0 || shape.fill.kind !== "picture") return false;
+  page.clip = { slide: page.slideIndex, id: shape.id };
+  page.pasteCount = 0;
+  const bitmap = page.images.get(shape.fill.imagePath);
+  if (bitmap !== void 0 && navigator.clipboard !== void 0) {
+    const board = document.createElement("canvas");
+    board.width = bitmap.width;
+    board.height = bitmap.height;
+    board.getContext("2d")?.drawImage(bitmap, 0, 0);
+    void board.toBlob((blob) => {
+      if (blob === null || navigator.clipboard.write === void 0) return;
+      void navigator.clipboard.write([new ClipboardItem({ "image/png": blob })]).catch(() => {
+      });
+    }, "image/png");
+  }
+  return true;
+}
+function pastePicture() {
+  const doc = page.doc;
+  const clip = page.clip;
+  if (doc === null || clip === null) return;
+  page.pasteCount += 1;
+  const offset = page.pasteCount * 12 * EMU_PER_PIXEL;
+  try {
+    page.selectedId = doc.duplicateShape(clip.slide, clip.id, page.slideIndex, offset, offset);
+  } catch (error) {
+    note(error instanceof Error ? error.message : "\u65E0\u6CD5\u7C98\u8D34");
+    return;
+  }
+  page.pageSelected = false;
+  page.editing = false;
+  page.cropping = false;
+  markDirty();
+  render();
+}
 function hitTest(x, y) {
   const shapes = page.doc?.scene(page.slideIndex).shapes ?? [];
   const px = x / page.scale;
@@ -2958,16 +3561,17 @@ function render() {
   if (doc === null) {
     for (const button of thumbButtons()) button.remove();
     if (addButton !== null) addButton.disabled = true;
+    if (handles !== null) handles.hidden = true;
+    sheet?.classList.remove("page-selected");
     syncEditor(void 0);
     return;
   }
   syncThumbs(doc);
+  sheet?.classList.toggle("page-selected", page.pageSelected);
   const scene = doc.scene(page.slideIndex);
   const width = Math.max(1, scene.width / EMU_PER_PIXEL);
   const height = Math.max(1, scene.height / EMU_PER_PIXEL);
-  const stage = canvas.closest(".stage");
-  const available = Math.max(1, (stage?.clientWidth ?? width + 48) - 48);
-  const scale = Math.min(1, available / width);
+  const scale = page.zoom;
   page.scale = scale;
   const ratio = window.devicePixelRatio || 1;
   paintCanvas(
@@ -2981,8 +3585,10 @@ function render() {
     page.editing ? page.selectedId : void 0
   );
   const shape = selected();
-  if (shape !== void 0 && shape.selectable) strokeSelection(context, shape);
-  syncEditor(shape);
+  const shown = shape === void 0 ? void 0 : shownShape(shape);
+  if (shown !== void 0 && shown.selectable) strokeSelection(context, shown);
+  syncHandles(shown);
+  syncEditor(page.editing ? shape : void 0);
 }
 function syncThumbs(doc) {
   if (thumbs === null) return;
@@ -3034,6 +3640,7 @@ function createThumb() {
     drag.moved = true;
     button.classList.add("dragging");
     showDrop(dropSlot(event.clientY, drag.index));
+    moveThumbGhost(event.clientX, event.clientY);
   });
   button.addEventListener("pointerup", (event) => {
     if (drag === null || event.pointerId !== drag.pointerId) return;
@@ -3088,14 +3695,53 @@ function showDrop(slot) {
   clearDrop();
   const buttons = thumbButtons();
   const from = drag?.index;
-  if (from === void 0 || slot.to === from) return;
-  if (slot.raw >= buttons.length) buttons[buttons.length - 1]?.classList.add("drop-after");
-  else buttons[slot.raw]?.classList.add("drop-before");
+  if (from === void 0) return;
+  const source = buttons[from];
+  source?.classList.add("dragging");
+  const height = (source?.offsetHeight ?? 84) + 14;
+  if (slot.to !== from) {
+    buttons.forEach((button, index) => {
+      let shift = 0;
+      if (index !== from && from < slot.raw && index > from && index < slot.raw) shift = -height;
+      if (index !== from && slot.raw < from && index >= slot.raw && index < from) shift = height;
+      button.style.transform = shift === 0 ? "" : `translateY(${shift}px)`;
+    });
+    if (slot.raw >= buttons.length) buttons[buttons.length - 1]?.classList.add("drop-after");
+    else buttons[slot.raw]?.classList.add("drop-before");
+  }
+  placeThumbGhost();
+}
+function placeThumbGhost() {
+  if (thumbGhost === null || drag === null) return;
+  const source = thumbButtons()[drag.index]?.querySelector("canvas");
+  if (!(source instanceof HTMLCanvasElement)) return;
+  if (thumbGhost.dataset.index !== String(drag.index)) {
+    const copy = document.createElement("canvas");
+    copy.width = source.width;
+    copy.height = source.height;
+    copy.style.width = source.style.width;
+    copy.style.height = source.style.height;
+    copy.getContext("2d")?.drawImage(source, 0, 0);
+    thumbGhost.replaceChildren(copy);
+    thumbGhost.dataset.index = String(drag.index);
+  }
+  thumbGhost.hidden = false;
+}
+function moveThumbGhost(clientX, clientY) {
+  if (thumbGhost === null) return;
+  const width = thumbGhost.offsetWidth || 148;
+  thumbGhost.style.left = `${clientX - width / 2}px`;
+  thumbGhost.style.top = `${clientY - 24}px`;
 }
 function clearDrop() {
   if (thumbs === null) return;
   for (const button of thumbButtons()) {
     button.classList.remove("dragging", "drop-before", "drop-after");
+    button.style.transform = "";
+  }
+  if (thumbGhost !== null) {
+    thumbGhost.hidden = true;
+    delete thumbGhost.dataset.index;
   }
 }
 function paintThumb(preview, scene) {
@@ -3131,59 +3777,60 @@ function paintBackdrop(ctx, fill, width, height) {
   ctx.fillRect(0, 0, width, height);
 }
 function drawShape(ctx, shape, omitTextId) {
-  const x = shape.x / EMU_PER_PIXEL;
-  const y = shape.y / EMU_PER_PIXEL;
-  const width = shape.width / EMU_PER_PIXEL;
-  const height = shape.height / EMU_PER_PIXEL;
+  const drawn = shownShape(shape);
+  const x = drawn.x / EMU_PER_PIXEL;
+  const y = drawn.y / EMU_PER_PIXEL;
+  const width = drawn.width / EMU_PER_PIXEL;
+  const height = drawn.height / EMU_PER_PIXEL;
   ctx.save();
   const cx = x + width / 2;
   const cy = y + height / 2;
   ctx.translate(cx, cy);
-  ctx.rotate(shape.rotation * Math.PI / 180);
-  if (shape.flipH || shape.flipV) ctx.scale(shape.flipH ? -1 : 1, shape.flipV ? -1 : 1);
+  ctx.rotate(drawn.rotation * Math.PI / 180);
+  if (drawn.flipH || drawn.flipV) ctx.scale(drawn.flipH ? -1 : 1, drawn.flipV ? -1 : 1);
   ctx.translate(-cx, -cy);
-  if (shape.geometry === "line") {
-    strokeLine(ctx, shape, x, y, width, height);
+  if (drawn.geometry === "line") {
+    strokeLine(ctx, drawn, x, y, width, height);
     ctx.restore();
     return;
   }
-  if (shape.shadow !== void 0) {
-    ctx.shadowColor = shape.shadow.color;
-    ctx.shadowBlur = shape.shadow.blur / EMU_PER_PIXEL;
-    ctx.shadowOffsetX = shape.shadow.offsetX / EMU_PER_PIXEL;
-    ctx.shadowOffsetY = shape.shadow.offsetY / EMU_PER_PIXEL;
+  if (drawn.shadow !== void 0) {
+    ctx.shadowColor = drawn.shadow.color;
+    ctx.shadowBlur = drawn.shadow.blur / EMU_PER_PIXEL;
+    ctx.shadowOffsetX = drawn.shadow.offsetX / EMU_PER_PIXEL;
+    ctx.shadowOffsetY = drawn.shadow.offsetY / EMU_PER_PIXEL;
   }
-  trace(ctx, shape, x, y, width, height);
-  if (shape.fill.kind === "solid" || shape.fill.kind === "linear" || shape.fill.kind === "radial") {
-    ctx.fillStyle = paintFillStyle(ctx, shape.fill, x, y, width, height);
+  trace(ctx, drawn, x, y, width, height);
+  if (drawn.fill.kind === "solid" || drawn.fill.kind === "linear" || drawn.fill.kind === "radial") {
+    ctx.fillStyle = paintFillStyle(ctx, drawn.fill, x, y, width, height);
     ctx.fill();
-  } else if (shape.shadow !== void 0 && shape.fill.kind === "picture") {
+  } else if (drawn.shadow !== void 0 && drawn.fill.kind === "picture") {
     ctx.fillStyle = "#ffffff";
     ctx.fill();
   }
   ctx.shadowColor = "transparent";
-  if (shape.fill.kind === "picture") {
+  if (drawn.fill.kind === "picture") {
     ctx.save();
-    trace(ctx, shape, x, y, width, height);
+    trace(ctx, drawn, x, y, width, height);
     ctx.clip();
-    const bitmap = page.images.get(shape.fill.imagePath);
+    const bitmap = page.images.get(drawn.fill.imagePath);
     if (bitmap === void 0) {
       ctx.fillStyle = "#e6e8ea";
       ctx.fillRect(x, y, width, height);
     } else {
-      drawBitmap(ctx, bitmap, shape.fill.crop, x, y, width, height);
+      drawBitmap(ctx, bitmap, drawn.fill.crop, x, y, width, height);
     }
     ctx.restore();
   }
-  if (shape.line !== void 0) {
-    ctx.strokeStyle = shape.line.color;
-    ctx.lineWidth = Math.max(shape.line.width / EMU_PER_PIXEL, 0.5);
-    setDash(ctx, shape.line.dash);
-    trace(ctx, shape, x, y, width, height);
+  if (drawn.line !== void 0) {
+    ctx.strokeStyle = drawn.line.color;
+    ctx.lineWidth = Math.max(drawn.line.width / EMU_PER_PIXEL, 0.5);
+    setDash(ctx, drawn.line.dash);
+    trace(ctx, drawn, x, y, width, height);
     ctx.stroke();
     ctx.setLineDash([]);
   }
-  if (shape.text !== void 0 && shape.id !== omitTextId) drawText(ctx, shape, x, y, width, height);
+  if (drawn.text !== void 0 && drawn.id !== omitTextId) drawText(ctx, drawn, x, y, width, height);
   ctx.restore();
 }
 function strokeSelection(ctx, shape) {

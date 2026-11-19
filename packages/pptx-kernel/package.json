@@ -1,6 +1,6 @@
 {
   "name": "@dsh/pptx-kernel",
-  "version": "0.0.0",
+  "version": "0.1.1",
   "private": true,
   "description": "From-scratch PPTX kernel for opening and editing presentations in the browser.",
   "type": "module",

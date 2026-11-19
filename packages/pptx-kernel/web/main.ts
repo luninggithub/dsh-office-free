@@ -34,7 +34,43 @@ const page = {
   dirty: false,
   label: '',
   servedName: null as string | null,
-  handle: null as SavedFile | null
+  handle: null as SavedFile | null,
+  zoom: 1,
+  pageSelected: false,
+  cropping: false,
+  live: undefined as LiveShape | undefined,
+  clip: null as { slide: number; id: string } | null,
+  pasteCount: 0
+}
+
+interface Box {
+  readonly x: number
+  readonly y: number
+  readonly width: number
+  readonly height: number
+}
+
+interface LiveShape {
+  readonly id: string
+  readonly box: Box
+  readonly crop?: {
+    readonly left: number
+    readonly top: number
+    readonly right: number
+    readonly bottom: number
+  }
+}
+
+interface ShapeGesture {
+  kind: 'pending' | 'move' | 'resize' | 'crop'
+  readonly id: string
+  readonly pointerId: number
+  readonly startClientX: number
+  readonly startClientY: number
+  readonly origin: Box
+  readonly handle: string
+  readonly crop: { left: number; top: number; right: number; bottom: number }
+  moved: boolean
 }
 
 let pressing = false
@@ -42,6 +78,7 @@ let painting = false
 let plainOpen = readPlainOpen()
 let menuIndex = -1
 let drag: ThumbDrag | null = null
+let shapeGesture: ShapeGesture | null = null
 
 interface ThumbDrag {
   readonly index: number
@@ -60,8 +97,19 @@ const thumbs = document.querySelector<HTMLElement>('#thumbs')
 const slideMenu = document.querySelector<HTMLDivElement>('#slide-menu')
 const copySlideButton = document.querySelector<HTMLButtonElement>('#copy-slide')
 const deleteSlideButton = document.querySelector<HTMLButtonElement>('#delete-slide')
+const viewport = document.querySelector<HTMLDivElement>('#viewport')
 const sheet = document.querySelector<HTMLDivElement>('#sheet')
 const canvas = document.querySelector<HTMLCanvasElement>('#slide')
+const handles = document.querySelector<HTMLDivElement>('#handles')
+const cropButton = document.querySelector<HTMLButtonElement>('#crop-shape')
+const shapeMenu = document.querySelector<HTMLDivElement>('#shape-menu')
+const copyShapeButton = document.querySelector<HTMLButtonElement>('#copy-shape')
+const deleteShapeButton = document.querySelector<HTMLButtonElement>('#delete-shape')
+const zoomInput = document.querySelector<HTMLInputElement>('#zoom')
+const zoomOut = document.querySelector<HTMLButtonElement>('#zoom-out')
+const zoomIn = document.querySelector<HTMLButtonElement>('#zoom-in')
+const zoomLabel = document.querySelector<HTMLSpanElement>('#zoom-label')
+const thumbGhost = document.querySelector<HTMLDivElement>('#thumb-ghost')
 const editorFrame = document.querySelector<HTMLDivElement>('#editor-frame')
 const editor = document.querySelector<HTMLDivElement>('#editor')
 const context = canvas?.getContext('2d')
@@ -95,18 +143,82 @@ deleteSlideButton?.addEventListener('click', () => {
   deleteAt(index)
 })
 document.addEventListener('pointerdown', (event) => {
-  if (slideMenu === null || slideMenu.hidden) return
-  if (event.target instanceof Node && slideMenu.contains(event.target)) return
-  hideMenu()
+  if (!(event.target instanceof Node)) return
+  if (slideMenu !== null && !slideMenu.hidden && !slideMenu.contains(event.target)) hideMenu()
+  if (shapeMenu !== null && !shapeMenu.hidden && !shapeMenu.contains(event.target)) hideShapeMenu()
 })
 window.addEventListener('keydown', (event) => {
-  if (event.key === 'Escape') hideMenu()
+  if (event.key === 'Escape') {
+    hideMenu()
+    hideShapeMenu()
+    if (page.cropping) {
+      page.cropping = false
+      render()
+    }
+    return
+  }
+  if (typingTarget()) return
+  if (event.key === 'Delete' || event.key === 'Backspace') {
+    event.preventDefault()
+    deleteSelectedShape()
+    return
+  }
+  if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'c') {
+    if (copySelectedPicture()) event.preventDefault()
+    return
+  }
+  if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'v') {
+    event.preventDefault()
+    pastePicture()
+  }
+})
+copyShapeButton?.addEventListener('click', () => {
+  copySelectedPicture()
+  hideShapeMenu()
+})
+deleteShapeButton?.addEventListener('click', () => {
+  hideShapeMenu()
+  deleteSelectedShape()
+})
+cropButton?.addEventListener('click', () => {
+  page.cropping = !page.cropping
+  render()
+})
+zoomInput?.addEventListener('input', () => {
+  setZoom(Number(zoomInput.value) / 100)
+})
+zoomOut?.addEventListener('click', () => {
+  setZoom((Math.round(page.zoom * 100) - 10) / 100)
+})
+zoomIn?.addEventListener('click', () => {
+  setZoom((Math.round(page.zoom * 100) + 10) / 100)
+})
+// Wheel zooms only after the slide page itself is selected. A picture, a text box, or a click beside the page leaves the wheel for scrolling. Empty autoshapes count as the page.
+viewport?.addEventListener(
+  'wheel',
+  (event) => {
+    if (page.doc === null || !page.pageSelected) return
+    event.preventDefault()
+    setZoom(page.zoom * (event.deltaY < 0 ? 1.08 : 1 / 1.08))
+  },
+  { passive: false }
+)
+viewport?.addEventListener('pointerdown', (event) => {
+  if (event.button !== 0 || event.target !== viewport) return
+  if (!page.pageSelected && page.selectedId === undefined && !page.editing) return
+  page.pageSelected = false
+  page.selectedId = undefined
+  page.editing = false
+  page.cropping = false
+  page.live = undefined
+  render()
 })
 thumbs?.addEventListener('scroll', () => {
   hideMenu()
 })
 sheet?.addEventListener('pointerdown', (event) => {
   if (event.button !== 0 || canvas === null || !(event.target instanceof Node)) return
+  if (event.target instanceof Element && event.target.closest('#handles, #shape-menu')) return
   pressing = true
   const box = canvas.getBoundingClientRect()
   const shape = hitTest(event.clientX - box.left, event.clientY - box.top)
@@ -118,17 +230,95 @@ sheet?.addEventListener('pointerdown', (event) => {
   if (sameText) return
   // Keep the pointer from moving focus. A blur while the pointer is down hides the editor and drops the click.
   event.preventDefault()
-  page.selectedId = shape?.id
-  page.editing = shape?.editable === true
+  const previous = page.selectedId
+  const content = shape !== undefined && isContent(shape)
+  page.pageSelected = !content
+  page.selectedId = content ? shape.id : undefined
+  page.editing = false
+  page.cropping = content && shape.fill.kind === 'picture' && shape.id === previous && page.cropping
+  if (content) {
+    const shown = shownShape(shape)
+    shapeGesture = {
+      kind: 'pending',
+      id: shape.id,
+      pointerId: event.pointerId,
+      startClientX: event.clientX,
+      startClientY: event.clientY,
+      origin: shapeBox(shown),
+      handle: '',
+      crop: pictureCrop(shown),
+      moved: false
+    }
+    canvas.setPointerCapture(event.pointerId)
+  }
   render()
-  if (shape?.editable === true) placeCaret(event.clientX, event.clientY)
+})
+sheet?.addEventListener('dblclick', (event) => {
+  if (canvas === null || !(event.target instanceof Node)) return
+  if (editor !== null && editor.contains(event.target)) return
+  const box = canvas.getBoundingClientRect()
+  const shape = hitTest(event.clientX - box.left, event.clientY - box.top)
+  if (shape?.editable !== true) return
+  page.pageSelected = false
+  page.selectedId = shape.id
+  page.editing = true
+  page.cropping = false
+  render()
+  placeCaret(event.clientX, event.clientY)
+})
+sheet?.addEventListener('contextmenu', (event) => {
+  if (canvas === null) return
+  const box = canvas.getBoundingClientRect()
+  const shape = hitTest(event.clientX - box.left, event.clientY - box.top)
+  if (shape === undefined || !canMove(shape)) return
+  if (!isContent(shape)) {
+    event.preventDefault()
+    page.pageSelected = true
+    page.selectedId = undefined
+    page.editing = false
+    render()
+    return
+  }
+  event.preventDefault()
+  page.pageSelected = false
+  page.selectedId = shape.id
+  page.editing = false
+  render()
+  openShapeMenu(shape, event.clientX, event.clientY)
+})
+handles?.addEventListener('pointerdown', (event) => {
+  if (event.button !== 0 || canvas === null) return
+  const handle =
+    event.target instanceof Element ? event.target.closest<HTMLElement>('[data-handle]') : null
+  if (handle === null) return
+  const shape = selected()
+  if (shape === undefined || shape.fill.kind !== 'picture') return
+  event.preventDefault()
+  event.stopPropagation()
+  const shown = shownShape(shape)
+  shapeGesture = {
+    kind: page.cropping ? 'crop' : 'resize',
+    id: shape.id,
+    pointerId: event.pointerId,
+    startClientX: event.clientX,
+    startClientY: event.clientY,
+    origin: shapeBox(shown),
+    handle: handle.dataset.handle ?? 'se',
+    crop: pictureCrop(shown),
+    moved: true
+  }
+  handle.setPointerCapture(event.pointerId)
 })
 sheet?.addEventListener('mousedown', (event) => {
   if (event.button !== 0 || !(event.target instanceof Node)) return
   if (editor !== null && (event.target === editor || editor.contains(event.target))) return
   event.preventDefault()
 })
-window.addEventListener('pointerup', () => {
+window.addEventListener('pointermove', (event) => {
+  moveShapeGesture(event)
+})
+window.addEventListener('pointerup', (event) => {
+  finishShapeGesture(event)
   if (!pressing) return
   pressing = false
   if (page.editing && editor !== null && document.activeElement !== editor) editor.focus()
@@ -138,6 +328,17 @@ window.addEventListener('pointercancel', () => {
 })
 canvas?.addEventListener('mousemove', (event) => {
   const shape = hitTest(event.offsetX, event.offsetY)
+  const selectedShape = selected()
+  if (
+    shape !== undefined &&
+    selectedShape !== undefined &&
+    shape.id === selectedShape.id &&
+    canMove(shape) &&
+    !page.editing
+  ) {
+    canvas.style.cursor = 'move'
+    return
+  }
   canvas.style.cursor = shape?.editable === true ? 'text' : 'default'
 })
 editor?.addEventListener('input', (event) => {
@@ -332,9 +533,14 @@ async function openBytes(bytes: Uint8Array, label: string): Promise<void> {
   page.label = label
   page.slideIndex = 0
   page.selectedId = undefined
+  page.pageSelected = false
   page.editing = false
   page.editorShape = undefined
   page.thumbIndex = -1
+  page.cropping = false
+  page.live = undefined
+  page.clip = null
+  setZoom(1, false)
   page.images.clear()
   clearDirty()
   if (saveButton !== null) saveButton.disabled = false
@@ -397,6 +603,7 @@ async function discardEdits(): Promise<void> {
   page.doc = await openPptx(page.saved.slice())
   page.slideIndex = Math.min(index, Math.max(page.doc.slides().length - 1, 0))
   page.selectedId = undefined
+  page.pageSelected = false
   page.editing = false
   page.editorShape = undefined
   page.thumbIndex = -1
@@ -432,6 +639,7 @@ function deleteAt(index: number): void {
 
 function finishStructureChange(): void {
   page.selectedId = undefined
+  page.pageSelected = false
   page.editing = false
   page.editorShape = undefined
   page.thumbIndex = -1
@@ -444,6 +652,7 @@ function selectSlide(index: number): void {
   if (page.doc?.slides()[index] === undefined) return
   page.slideIndex = index
   page.selectedId = undefined
+  page.pageSelected = false
   page.editing = false
   page.editorShape = undefined
   if (document.activeElement === editor) editor?.blur()
@@ -725,6 +934,275 @@ function insertPlain(value: string): void {
   editor.dispatchEvent(new Event('input', { bubbles: true }))
 }
 
+function typingTarget(): boolean {
+  const node = document.activeElement
+  return node === editor || node instanceof HTMLInputElement || node instanceof HTMLTextAreaElement
+}
+
+function setZoom(next: number, paint = true): void {
+  page.zoom = Math.min(4, Math.max(0.1, next))
+  const percent = Math.round(page.zoom * 100)
+  if (zoomInput !== null) zoomInput.value = String(percent)
+  if (zoomLabel !== null) zoomLabel.textContent = `${percent}%`
+  if (zoomOut !== null) zoomOut.disabled = percent <= 10
+  if (zoomIn !== null) zoomIn.disabled = percent >= 400
+  if (paint && page.doc !== null) render()
+}
+
+function canMove(shape: PaintShape): boolean {
+  return shape.selectable && (shape.fill.kind === 'picture' || shape.editable)
+}
+
+function isContent(shape: PaintShape): boolean {
+  return canMove(shape) && (shape.fill.kind === 'picture' || shape.plain.length > 0)
+}
+
+function shapeBox(shape: PaintShape): Box {
+  return {
+    x: shape.x / EMU_PER_PIXEL,
+    y: shape.y / EMU_PER_PIXEL,
+    width: shape.width / EMU_PER_PIXEL,
+    height: shape.height / EMU_PER_PIXEL
+  }
+}
+
+function pictureCrop(shape: PaintShape): {
+  left: number
+  top: number
+  right: number
+  bottom: number
+} {
+  if (shape.fill.kind !== 'picture' || shape.fill.crop === undefined) {
+    return { left: 0, top: 0, right: 0, bottom: 0 }
+  }
+  return { ...shape.fill.crop }
+}
+
+function shownShape(shape: PaintShape): PaintShape {
+  const live = page.live
+  if (live === undefined || live.id !== shape.id) return shape
+  const framed = {
+    ...shape,
+    x: live.box.x * EMU_PER_PIXEL,
+    y: live.box.y * EMU_PER_PIXEL,
+    width: live.box.width * EMU_PER_PIXEL,
+    height: live.box.height * EMU_PER_PIXEL
+  }
+  if (live.crop === undefined || shape.fill.kind !== 'picture') return framed
+  return { ...framed, fill: { kind: 'picture', imagePath: shape.fill.imagePath, crop: live.crop } }
+}
+
+function moveShapeGesture(event: PointerEvent): void {
+  const gesture = shapeGesture
+  if (gesture === null || event.pointerId !== gesture.pointerId) return
+  const dx = (event.clientX - gesture.startClientX) / page.zoom
+  const dy = (event.clientY - gesture.startClientY) / page.zoom
+  if (gesture.kind === 'pending') {
+    if (Math.hypot(dx, dy) < 4) return
+    gesture.kind = 'move'
+    gesture.moved = true
+    page.editing = false
+  }
+  if (gesture.kind === 'move') {
+    page.live = {
+      id: gesture.id,
+      box: {
+        x: gesture.origin.x + dx,
+        y: gesture.origin.y + dy,
+        width: gesture.origin.width,
+        height: gesture.origin.height
+      }
+    }
+  } else if (gesture.kind === 'resize') {
+    page.live = { id: gesture.id, box: resizeBox(gesture.origin, gesture.handle, dx, dy) }
+  } else if (gesture.kind === 'crop') {
+    page.live = {
+      id: gesture.id,
+      box: gesture.origin,
+      crop: cropFromPointer(
+        gesture.origin,
+        gesture.crop,
+        gesture.handle,
+        event.clientX,
+        event.clientY
+      )
+    }
+  }
+  render()
+}
+
+function finishShapeGesture(event: PointerEvent): void {
+  const gesture = shapeGesture
+  if (gesture === null || event.pointerId !== gesture.pointerId) return
+  shapeGesture = null
+  const live = page.live
+  page.live = undefined
+  const doc = page.doc
+  if (doc === null || gesture.kind === 'pending' || live === undefined) {
+    render()
+    return
+  }
+  if (gesture.kind === 'crop' && live.crop !== undefined) {
+    doc.setPictureCrop(page.slideIndex, gesture.id, live.crop)
+  } else {
+    doc.setShapeFrame(page.slideIndex, gesture.id, {
+      x: live.box.x * EMU_PER_PIXEL,
+      y: live.box.y * EMU_PER_PIXEL,
+      width: live.box.width * EMU_PER_PIXEL,
+      height: live.box.height * EMU_PER_PIXEL
+    })
+  }
+  markDirty()
+  render()
+}
+
+function resizeBox(origin: Box, handle: string, dx: number, dy: number): Box {
+  const min = 8
+  let left = origin.x
+  let right = origin.x + origin.width
+  let top = origin.y
+  let bottom = origin.y + origin.height
+  if (handle.includes('w')) left = Math.min(origin.x + dx, right - min)
+  if (handle.includes('e')) right = Math.max(origin.x + origin.width + dx, left + min)
+  if (handle.includes('n')) top = Math.min(origin.y + dy, bottom - min)
+  if (handle.includes('s')) bottom = Math.max(origin.y + origin.height + dy, top + min)
+  return {
+    x: left,
+    y: top,
+    width: Math.max(min, right - left),
+    height: Math.max(min, bottom - top)
+  }
+}
+
+function cropFromPointer(
+  origin: Box,
+  start: { left: number; top: number; right: number; bottom: number },
+  handle: string,
+  clientX: number,
+  clientY: number
+): { left: number; top: number; right: number; bottom: number } {
+  const point = slidePoint(clientX, clientY)
+  const crop = { ...start }
+  const remain = 0.08
+  if (handle.includes('w')) {
+    crop.left = clamp((point.x - origin.x) / origin.width, 0, 1 - start.right - remain)
+  }
+  if (handle.includes('e')) {
+    crop.right = clamp(
+      (origin.x + origin.width - point.x) / origin.width,
+      0,
+      1 - start.left - remain
+    )
+  }
+  if (handle.includes('n')) {
+    crop.top = clamp((point.y - origin.y) / origin.height, 0, 1 - start.bottom - remain)
+  }
+  if (handle.includes('s')) {
+    crop.bottom = clamp(
+      (origin.y + origin.height - point.y) / origin.height,
+      0,
+      1 - start.top - remain
+    )
+  }
+  return crop
+}
+
+function slidePoint(clientX: number, clientY: number): { x: number; y: number } {
+  const rect = canvas?.getBoundingClientRect()
+  return {
+    x: (clientX - (rect?.left ?? 0)) / page.zoom,
+    y: (clientY - (rect?.top ?? 0)) / page.zoom
+  }
+}
+
+function clamp(value: number, min: number, max: number): number {
+  return Math.min(max, Math.max(min, value))
+}
+
+function syncHandles(shape: PaintShape | undefined): void {
+  if (handles === null) return
+  if (shape === undefined || shape.fill.kind !== 'picture' || page.editing) {
+    handles.hidden = true
+    return
+  }
+  const box = shapeBox(shape)
+  handles.hidden = false
+  handles.classList.toggle('cropping', page.cropping)
+  handles.style.left = `${box.x * page.zoom}px`
+  handles.style.top = `${box.y * page.zoom}px`
+  handles.style.width = `${box.width * page.zoom}px`
+  handles.style.height = `${box.height * page.zoom}px`
+  cropButton?.setAttribute('aria-pressed', page.cropping ? 'true' : 'false')
+}
+
+function openShapeMenu(shape: PaintShape, clientX: number, clientY: number): void {
+  if (shapeMenu === null) return
+  if (copyShapeButton !== null) copyShapeButton.hidden = shape.fill.kind !== 'picture'
+  shapeMenu.hidden = false
+  const width = shapeMenu.offsetWidth
+  const height = shapeMenu.offsetHeight
+  shapeMenu.style.left = `${Math.min(clientX, Math.max(8, window.innerWidth - width - 8))}px`
+  shapeMenu.style.top = `${Math.min(clientY, Math.max(8, window.innerHeight - height - 8))}px`
+}
+
+function hideShapeMenu(): void {
+  if (shapeMenu === null) return
+  shapeMenu.hidden = true
+}
+
+function deleteSelectedShape(): void {
+  const doc = page.doc
+  const shape = selected()
+  if (doc === null || shape === undefined || !canMove(shape)) return
+  doc.deleteShape(page.slideIndex, shape.id)
+  page.selectedId = undefined
+  page.editing = false
+  page.cropping = false
+  page.live = undefined
+  markDirty()
+  render()
+}
+
+function copySelectedPicture(): boolean {
+  const shape = selected()
+  if (shape === undefined || shape.fill.kind !== 'picture') return false
+  page.clip = { slide: page.slideIndex, id: shape.id }
+  page.pasteCount = 0
+  const bitmap = page.images.get(shape.fill.imagePath)
+  if (bitmap !== undefined && navigator.clipboard !== undefined) {
+    const board = document.createElement('canvas')
+    board.width = bitmap.width
+    board.height = bitmap.height
+    board.getContext('2d')?.drawImage(bitmap, 0, 0)
+    void board.toBlob((blob) => {
+      if (blob === null || navigator.clipboard.write === undefined) return
+      void navigator.clipboard.write([new ClipboardItem({ 'image/png': blob })]).catch(() => {
+        // The in-app paste still uses the captured shape when the browser refuses the clipboard.
+      })
+    }, 'image/png')
+  }
+  return true
+}
+
+function pastePicture(): void {
+  const doc = page.doc
+  const clip = page.clip
+  if (doc === null || clip === null) return
+  page.pasteCount += 1
+  const offset = page.pasteCount * 12 * EMU_PER_PIXEL
+  try {
+    page.selectedId = doc.duplicateShape(clip.slide, clip.id, page.slideIndex, offset, offset)
+  } catch (error) {
+    note(error instanceof Error ? error.message : '无法粘贴')
+    return
+  }
+  page.pageSelected = false
+  page.editing = false
+  page.cropping = false
+  markDirty()
+  render()
+}
+
 function hitTest(x: number, y: number): PaintShape | undefined {
   const shapes = page.doc?.scene(page.slideIndex).shapes ?? []
   const px = x / page.scale
@@ -779,16 +1257,17 @@ function render(): void {
   if (doc === null) {
     for (const button of thumbButtons()) button.remove()
     if (addButton !== null) addButton.disabled = true
+    if (handles !== null) handles.hidden = true
+    sheet?.classList.remove('page-selected')
     syncEditor(undefined)
     return
   }
   syncThumbs(doc)
+  sheet?.classList.toggle('page-selected', page.pageSelected)
   const scene = doc.scene(page.slideIndex)
   const width = Math.max(1, scene.width / EMU_PER_PIXEL)
   const height = Math.max(1, scene.height / EMU_PER_PIXEL)
-  const stage = canvas.closest('.stage')
-  const available = Math.max(1, (stage?.clientWidth ?? width + 48) - 48)
-  const scale = Math.min(1, available / width)
+  const scale = page.zoom
   page.scale = scale
   const ratio = window.devicePixelRatio || 1
   paintCanvas(
@@ -802,8 +1281,10 @@ function render(): void {
     page.editing ? page.selectedId : undefined
   )
   const shape = selected()
-  if (shape !== undefined && shape.selectable) strokeSelection(context, shape)
-  syncEditor(shape)
+  const shown = shape === undefined ? undefined : shownShape(shape)
+  if (shown !== undefined && shown.selectable) strokeSelection(context, shown)
+  syncHandles(shown)
+  syncEditor(page.editing ? shape : undefined)
 }
 
 function syncThumbs(doc: PptxDocument): void {
@@ -858,6 +1339,7 @@ function createThumb(): HTMLButtonElement {
     drag.moved = true
     button.classList.add('dragging')
     showDrop(dropSlot(event.clientY, drag.index))
+    moveThumbGhost(event.clientX, event.clientY)
   })
   button.addEventListener('pointerup', (event: PointerEvent) => {
     if (drag === null || event.pointerId !== drag.pointerId) return
@@ -915,15 +1397,56 @@ function showDrop(slot: { raw: number; to: number }): void {
   clearDrop()
   const buttons = thumbButtons()
   const from = drag?.index
-  if (from === undefined || slot.to === from) return
-  if (slot.raw >= buttons.length) buttons[buttons.length - 1]?.classList.add('drop-after')
-  else buttons[slot.raw]?.classList.add('drop-before')
+  if (from === undefined) return
+  const source = buttons[from]
+  source?.classList.add('dragging')
+  const height = (source?.offsetHeight ?? 84) + 14
+  if (slot.to !== from) {
+    buttons.forEach((button, index) => {
+      let shift = 0
+      if (index !== from && from < slot.raw && index > from && index < slot.raw) shift = -height
+      if (index !== from && slot.raw < from && index >= slot.raw && index < from) shift = height
+      button.style.transform = shift === 0 ? '' : `translateY(${shift}px)`
+    })
+    if (slot.raw >= buttons.length) buttons[buttons.length - 1]?.classList.add('drop-after')
+    else buttons[slot.raw]?.classList.add('drop-before')
+  }
+  placeThumbGhost()
+}
+
+function placeThumbGhost(): void {
+  if (thumbGhost === null || drag === null) return
+  const source = thumbButtons()[drag.index]?.querySelector('canvas')
+  if (!(source instanceof HTMLCanvasElement)) return
+  if (thumbGhost.dataset.index !== String(drag.index)) {
+    const copy = document.createElement('canvas')
+    copy.width = source.width
+    copy.height = source.height
+    copy.style.width = source.style.width
+    copy.style.height = source.style.height
+    copy.getContext('2d')?.drawImage(source, 0, 0)
+    thumbGhost.replaceChildren(copy)
+    thumbGhost.dataset.index = String(drag.index)
+  }
+  thumbGhost.hidden = false
+}
+
+function moveThumbGhost(clientX: number, clientY: number): void {
+  if (thumbGhost === null) return
+  const width = thumbGhost.offsetWidth || 148
+  thumbGhost.style.left = `${clientX - width / 2}px`
+  thumbGhost.style.top = `${clientY - 24}px`
 }
 
 function clearDrop(): void {
   if (thumbs === null) return
   for (const button of thumbButtons()) {
     button.classList.remove('dragging', 'drop-before', 'drop-after')
+    button.style.transform = ''
+  }
+  if (thumbGhost !== null) {
+    thumbGhost.hidden = true
+    delete thumbGhost.dataset.index
   }
 }
 
@@ -981,59 +1504,60 @@ function drawShape(
   shape: PaintShape,
   omitTextId: string | undefined
 ): void {
-  const x = shape.x / EMU_PER_PIXEL
-  const y = shape.y / EMU_PER_PIXEL
-  const width = shape.width / EMU_PER_PIXEL
-  const height = shape.height / EMU_PER_PIXEL
+  const drawn = shownShape(shape)
+  const x = drawn.x / EMU_PER_PIXEL
+  const y = drawn.y / EMU_PER_PIXEL
+  const width = drawn.width / EMU_PER_PIXEL
+  const height = drawn.height / EMU_PER_PIXEL
   ctx.save()
   const cx = x + width / 2
   const cy = y + height / 2
   ctx.translate(cx, cy)
-  ctx.rotate((shape.rotation * Math.PI) / 180)
-  if (shape.flipH || shape.flipV) ctx.scale(shape.flipH ? -1 : 1, shape.flipV ? -1 : 1)
+  ctx.rotate((drawn.rotation * Math.PI) / 180)
+  if (drawn.flipH || drawn.flipV) ctx.scale(drawn.flipH ? -1 : 1, drawn.flipV ? -1 : 1)
   ctx.translate(-cx, -cy)
-  if (shape.geometry === 'line') {
-    strokeLine(ctx, shape, x, y, width, height)
+  if (drawn.geometry === 'line') {
+    strokeLine(ctx, drawn, x, y, width, height)
     ctx.restore()
     return
   }
-  if (shape.shadow !== undefined) {
-    ctx.shadowColor = shape.shadow.color
-    ctx.shadowBlur = shape.shadow.blur / EMU_PER_PIXEL
-    ctx.shadowOffsetX = shape.shadow.offsetX / EMU_PER_PIXEL
-    ctx.shadowOffsetY = shape.shadow.offsetY / EMU_PER_PIXEL
+  if (drawn.shadow !== undefined) {
+    ctx.shadowColor = drawn.shadow.color
+    ctx.shadowBlur = drawn.shadow.blur / EMU_PER_PIXEL
+    ctx.shadowOffsetX = drawn.shadow.offsetX / EMU_PER_PIXEL
+    ctx.shadowOffsetY = drawn.shadow.offsetY / EMU_PER_PIXEL
   }
-  trace(ctx, shape, x, y, width, height)
-  if (shape.fill.kind === 'solid' || shape.fill.kind === 'linear' || shape.fill.kind === 'radial') {
-    ctx.fillStyle = paintFillStyle(ctx, shape.fill, x, y, width, height)
+  trace(ctx, drawn, x, y, width, height)
+  if (drawn.fill.kind === 'solid' || drawn.fill.kind === 'linear' || drawn.fill.kind === 'radial') {
+    ctx.fillStyle = paintFillStyle(ctx, drawn.fill, x, y, width, height)
     ctx.fill()
-  } else if (shape.shadow !== undefined && shape.fill.kind === 'picture') {
+  } else if (drawn.shadow !== undefined && drawn.fill.kind === 'picture') {
     ctx.fillStyle = '#ffffff'
     ctx.fill()
   }
   ctx.shadowColor = 'transparent'
-  if (shape.fill.kind === 'picture') {
+  if (drawn.fill.kind === 'picture') {
     ctx.save()
-    trace(ctx, shape, x, y, width, height)
+    trace(ctx, drawn, x, y, width, height)
     ctx.clip()
-    const bitmap = page.images.get(shape.fill.imagePath)
+    const bitmap = page.images.get(drawn.fill.imagePath)
     if (bitmap === undefined) {
       ctx.fillStyle = '#e6e8ea'
       ctx.fillRect(x, y, width, height)
     } else {
-      drawBitmap(ctx, bitmap, shape.fill.crop, x, y, width, height)
+      drawBitmap(ctx, bitmap, drawn.fill.crop, x, y, width, height)
     }
     ctx.restore()
   }
-  if (shape.line !== undefined) {
-    ctx.strokeStyle = shape.line.color
-    ctx.lineWidth = Math.max(shape.line.width / EMU_PER_PIXEL, 0.5)
-    setDash(ctx, shape.line.dash)
-    trace(ctx, shape, x, y, width, height)
+  if (drawn.line !== undefined) {
+    ctx.strokeStyle = drawn.line.color
+    ctx.lineWidth = Math.max(drawn.line.width / EMU_PER_PIXEL, 0.5)
+    setDash(ctx, drawn.line.dash)
+    trace(ctx, drawn, x, y, width, height)
     ctx.stroke()
     ctx.setLineDash([])
   }
-  if (shape.text !== undefined && shape.id !== omitTextId) drawText(ctx, shape, x, y, width, height)
+  if (drawn.text !== undefined && drawn.id !== omitTextId) drawText(ctx, drawn, x, y, width, height)
   ctx.restore()
 }
 
