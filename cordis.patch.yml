@@ -1,0 +1,4 @@
+# Current PPTX kernel, served inside an authenticated DSH session at /office/.
+- insert:
+    - id: office
+      name: dsh-univer-office

@@ -24,6 +24,17 @@ node packages/pptx-kernel/web/server.mjs
 
 打开 `http://127.0.0.1:4173/`。「保存」会覆盖通过文件选择器、拖入的文件句柄，或本服务 `?open=` 打开的文件，不会另存下载。
 
+## 安装到 DSH
+
+在 DeepSeek Harness 源码目录执行：
+
+```sh
+pnpm dsh plugin --profile web add D:\icode\github\dsh-office-free
+pnpm dsh web
+```
+
+安装并重新打开 Web 后，DSH 里生成或点开的 `.pptx` 会用这个内核显示在会话右侧，和默认预览同一块区域。拖动这一栏左边缘可以左右改变宽度。登录后也可以直接打开 `http://127.0.0.1:3080/office/`。这个地址走 DSH 的登录校验，不提供独立预览服务的 `/save`。
+
 ## 开发
 
 需要 Node.js `>=22.19.0` 和 `pnpm@11.23.0`。

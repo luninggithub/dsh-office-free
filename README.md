@@ -24,6 +24,17 @@ node packages/pptx-kernel/web/server.mjs
 
 Open `http://127.0.0.1:4173/`. **保存** overwrites a file opened with the file picker, a dropped file handle, or `?open=` from this server. It does not download a new copy.
 
+## Install into DSH
+
+From a DeepSeek Harness checkout:
+
+```sh
+pnpm dsh plugin --profile web add D:\icode\github\dsh-office-free
+pnpm dsh web
+```
+
+After installation, restart the Web app. A `.pptx` generated or opened in DSH then uses this kernel in the session's right-hand preview, the same pane as the default viewer. Drag the pane's left edge to change its width. Signing in and opening `http://127.0.0.1:3080/office/` also serves the page. That route uses DSH authentication and does not provide the standalone preview server's `/save`.
+
 ## Development
 
 Node.js `>=22.19.0` and `pnpm@11.23.0`.

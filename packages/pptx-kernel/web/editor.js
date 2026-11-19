@@ -2514,6 +2514,7 @@ var saveButton = document.querySelector("#save");
 var discardButton = document.querySelector("#discard");
 var addButton = document.querySelector("#add-slide");
 var thumbs = document.querySelector("#thumbs");
+var paneSplit = document.querySelector("#pane-split");
 var slideMenu = document.querySelector("#slide-menu");
 var copySlideButton = document.querySelector("#copy-slide");
 var deleteSlideButton = document.querySelector("#delete-slide");
@@ -2607,10 +2608,45 @@ zoomInput?.addEventListener("input", () => {
   setZoom(Number(zoomInput.value) / 100);
 });
 zoomOut?.addEventListener("click", () => {
-  setZoom((Math.round(page.zoom * 100) - 10) / 100);
+  setZoom((Math.round(page.zoom * 100) - 1) / 100);
 });
 zoomIn?.addEventListener("click", () => {
-  setZoom((Math.round(page.zoom * 100) + 10) / 100);
+  setZoom((Math.round(page.zoom * 100) + 1) / 100);
+});
+if (paneSplit !== null && thumbs !== null) {
+  const bar = paneSplit;
+  const preview = thumbs;
+  bar.addEventListener("pointerdown", (event) => {
+    if (event.button !== 0) return;
+    event.preventDefault();
+    const startX = event.clientX;
+    const startWidth = preview.getBoundingClientRect().width;
+    const pointerId = event.pointerId;
+    bar.classList.add("dragging");
+    try {
+      bar.setPointerCapture(pointerId);
+    } catch {
+    }
+    const move = (ev) => {
+      if (ev.pointerId !== pointerId) return;
+      preview.style.width = `${thumbWidth(startWidth + ev.clientX - startX)}px`;
+    };
+    const end = (ev) => {
+      if (ev.pointerId !== pointerId) return;
+      bar.classList.remove("dragging");
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", end);
+      window.removeEventListener("pointercancel", end);
+    };
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", end);
+    window.addEventListener("pointercancel", end);
+  });
+}
+window.addEventListener("resize", () => {
+  if (thumbs === null) return;
+  const fitted = thumbWidth(thumbs.getBoundingClientRect().width);
+  if (Math.abs(thumbs.getBoundingClientRect().width - fitted) > 1) thumbs.style.width = `${fitted}px`;
 });
 viewport?.addEventListener(
   "wheel",
@@ -2789,6 +2825,16 @@ document.body.addEventListener("drop", (event) => {
 });
 var requested = new URLSearchParams(location.search).get("open");
 if (requested !== null && safeFileName(requested)) void openRequested(requested);
+if (embeddedFrame()) {
+  window.addEventListener("message", (event) => {
+    if (event.source !== window.parent || event.origin !== location.origin) return;
+    const message = event.data;
+    if (message?.type !== "dsh-office-open" || !(message.bytes instanceof ArrayBuffer)) return;
+    const name = typeof message.name === "string" && message.name.length > 0 ? message.name : "presentation.pptx";
+    void openBytes(new Uint8Array(message.bytes), name);
+  });
+  window.parent.postMessage({ type: "dsh-office-ready" }, location.origin);
+}
 async function openRequested(name) {
   try {
     const response = await fetch(encodeURIComponent(name));
@@ -3276,6 +3322,14 @@ function insertPlain(value) {
 function typingTarget() {
   const node = document.activeElement;
   return node === editor || node instanceof HTMLInputElement || node instanceof HTMLTextAreaElement;
+}
+var THUMB_MIN = 96;
+var STAGE_MIN = 160;
+function thumbWidth(next) {
+  const total = thumbs?.parentElement?.getBoundingClientRect().width ?? 0;
+  const split = paneSplit?.getBoundingClientRect().width ?? 0;
+  const max = Math.max(THUMB_MIN, total - split - STAGE_MIN);
+  return Math.round(Math.min(max, Math.max(THUMB_MIN, next)));
 }
 function setZoom(next, paint = true) {
   page.zoom = Math.min(4, Math.max(0.1, next));

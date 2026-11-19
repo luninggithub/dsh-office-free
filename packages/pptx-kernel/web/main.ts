@@ -94,6 +94,7 @@ const saveButton = document.querySelector<HTMLButtonElement>('#save')
 const discardButton = document.querySelector<HTMLButtonElement>('#discard')
 const addButton = document.querySelector<HTMLButtonElement>('#add-slide')
 const thumbs = document.querySelector<HTMLElement>('#thumbs')
+const paneSplit = document.querySelector<HTMLDivElement>('#pane-split')
 const slideMenu = document.querySelector<HTMLDivElement>('#slide-menu')
 const copySlideButton = document.querySelector<HTMLButtonElement>('#copy-slide')
 const deleteSlideButton = document.querySelector<HTMLButtonElement>('#delete-slide')
@@ -188,10 +189,46 @@ zoomInput?.addEventListener('input', () => {
   setZoom(Number(zoomInput.value) / 100)
 })
 zoomOut?.addEventListener('click', () => {
-  setZoom((Math.round(page.zoom * 100) - 10) / 100)
+  setZoom((Math.round(page.zoom * 100) - 1) / 100)
 })
 zoomIn?.addEventListener('click', () => {
-  setZoom((Math.round(page.zoom * 100) + 10) / 100)
+  setZoom((Math.round(page.zoom * 100) + 1) / 100)
+})
+if (paneSplit !== null && thumbs !== null) {
+  const bar = paneSplit
+  const preview = thumbs
+  bar.addEventListener('pointerdown', (event) => {
+    if (event.button !== 0) return
+    event.preventDefault()
+    const startX = event.clientX
+    const startWidth = preview.getBoundingClientRect().width
+    const pointerId = event.pointerId
+    bar.classList.add('dragging')
+    try {
+      bar.setPointerCapture(pointerId)
+    } catch {
+      // A pointer the browser will not capture still reports move and up on window.
+    }
+    const move = (ev: PointerEvent): void => {
+      if (ev.pointerId !== pointerId) return
+      preview.style.width = `${thumbWidth(startWidth + ev.clientX - startX)}px`
+    }
+    const end = (ev: PointerEvent): void => {
+      if (ev.pointerId !== pointerId) return
+      bar.classList.remove('dragging')
+      window.removeEventListener('pointermove', move)
+      window.removeEventListener('pointerup', end)
+      window.removeEventListener('pointercancel', end)
+    }
+    window.addEventListener('pointermove', move)
+    window.addEventListener('pointerup', end)
+    window.addEventListener('pointercancel', end)
+  })
+}
+window.addEventListener('resize', () => {
+  if (thumbs === null) return
+  const fitted = thumbWidth(thumbs.getBoundingClientRect().width)
+  if (Math.abs(thumbs.getBoundingClientRect().width - fitted) > 1) thumbs.style.width = `${fitted}px`
 })
 // Wheel zooms only after the slide page itself is selected. A picture, a text box, or a click beside the page leaves the wheel for scrolling. Empty autoshapes count as the page.
 viewport?.addEventListener(
@@ -384,6 +421,17 @@ document.body.addEventListener('drop', (event) => {
 
 const requested = new URLSearchParams(location.search).get('open')
 if (requested !== null && safeFileName(requested)) void openRequested(requested)
+
+if (embeddedFrame()) {
+  window.addEventListener('message', (event) => {
+    if (event.source !== window.parent || event.origin !== location.origin) return
+    const message = event.data as { type?: unknown; name?: unknown; bytes?: unknown }
+    if (message?.type !== 'dsh-office-open' || !(message.bytes instanceof ArrayBuffer)) return
+    const name = typeof message.name === 'string' && message.name.length > 0 ? message.name : 'presentation.pptx'
+    void openBytes(new Uint8Array(message.bytes), name)
+  })
+  window.parent.postMessage({ type: 'dsh-office-ready' }, location.origin)
+}
 
 async function openRequested(name: string): Promise<void> {
   try {
@@ -937,6 +985,16 @@ function insertPlain(value: string): void {
 function typingTarget(): boolean {
   const node = document.activeElement
   return node === editor || node instanceof HTMLInputElement || node instanceof HTMLTextAreaElement
+}
+
+const THUMB_MIN = 96
+const STAGE_MIN = 160
+
+function thumbWidth(next: number): number {
+  const total = thumbs?.parentElement?.getBoundingClientRect().width ?? 0
+  const split = paneSplit?.getBoundingClientRect().width ?? 0
+  const max = Math.max(THUMB_MIN, total - split - STAGE_MIN)
+  return Math.round(Math.min(max, Math.max(THUMB_MIN, next)))
 }
 
 function setZoom(next: number, paint = true): void {
