@@ -7,6 +7,7 @@ import {
   decodeXml,
   escapeXml,
   findDescendant,
+  parseAttributes,
   type XmlElement
 } from './xml.ts'
 import { readZip, writeZip } from './zip.ts'
@@ -47,13 +48,19 @@ export interface SlidePage {
   readonly shapes: readonly SlideShape[]
 }
 
+interface SlideEntry {
+  readonly relationId: string
+  readonly tag: string
+  readonly partName: string
+}
+
 /** EMU (English Metric Units) per CSS pixel at 96dpi. */
 export const EMU_PER_PIXEL = 914400 / 96
 
 export class PptxDocument {
   private readonly original: Uint8Array
   private readonly parts: Map<string, Uint8Array>
-  private readonly order: readonly string[]
+  private order: string[]
   private readonly edited = new Map<string, string>()
   private readonly scenes = new Map<number, SlideScene>()
   private dirty = false
@@ -65,7 +72,7 @@ export class PptxDocument {
   ) {
     this.original = original
     this.parts = parts
-    this.order = order
+    this.order = [...order]
   }
 
   static async open(input: Uint8Array): Promise<PptxDocument> {
@@ -125,19 +132,200 @@ export class PptxDocument {
   }
 
   /**
-   * Replace the visible text of one shape. The first text node keeps its run properties and
-   * receives the whole string; later text nodes in that shape become empty.
+   * Replace the visible text of one shape. Characters that did not change stay in their
+   * original runs, so a later run such as a unit keeps its size, weight, and color.
    */
   setShapeText(slideIndex: number, shapeId: string, text: string): void {
+    this.writeShapeText(slideIndex, shapeId, (current) => distributeRuns(current, text))
+  }
+
+  /** Write one string per existing run. Run properties in the package are left untouched. */
+  setShapeRuns(
+    slideIndex: number,
+    shapeId: string,
+    paragraphs: readonly (readonly string[])[]
+  ): void {
+    this.writeShapeText(slideIndex, shapeId, () => paragraphs.map((runs) => [...runs]))
+  }
+
+  /**
+   * Append a blank slide, using the layout of `layoutFromIndex` so the deck template stays
+   * in effect. Returns the new slide index.
+   */
+  addSlide(layoutFromIndex: number): number {
+    const existing = this.slides()
+    const index = existing.length
+    const source =
+      existing[Math.min(Math.max(layoutFromIndex, 0), Math.max(existing.length - 1, 0))]
+    const layout =
+      source === undefined ? this.anyLayoutTarget() : this.layoutTarget(source.partName)
+    this.insertSlide(index, blankSlide(), slideRelationships(layout))
+    return index
+  }
+
+  /** Insert an identical copy immediately after `index`. Returns the copy's index. */
+  duplicateSlide(index: number): number {
+    const source = this.slideEntries()[index]
+    if (source === undefined) throw new Error(`pptx: slide ${index} does not exist`)
+    const rels = this.optionalText(slideRelsName(source.partName)) ?? slideRelationships(undefined)
+    this.insertSlide(index + 1, this.text(source.partName), rels)
+    return index + 1
+  }
+
+  /**
+   * Move the slide at `fromIndex` so it occupies `toIndex`.
+   * Both indexes are positions in the current slide list.
+   */
+  moveSlide(fromIndex: number, toIndex: number): void {
+    const entries = this.slideEntries()
+    if (entries[fromIndex] === undefined) throw new Error(`pptx: slide ${fromIndex} does not exist`)
+    if (entries[toIndex] === undefined) throw new Error(`pptx: slide ${toIndex} does not exist`)
+    if (fromIndex === toIndex) return
+    const next = entries.slice()
+    const [moved] = next.splice(fromIndex, 1)
+    if (moved === undefined) return
+    next.splice(toIndex, 0, moved)
+    this.remember(
+      'ppt/presentation.xml',
+      replaceSlideIds(
+        this.text('ppt/presentation.xml'),
+        next.map((entry) => entry.tag)
+      )
+    )
+    this.dirty = true
+    this.scenes.clear()
+  }
+
+  /** Remove one slide. A deck must keep its last slide. */
+  deleteSlide(index: number): void {
+    const entries = this.slideEntries()
+    const entry = entries[index]
+    if (entry === undefined) throw new Error(`pptx: slide ${index} does not exist`)
+    if (entries.length <= 1) throw new Error('pptx: the only slide cannot be deleted')
+    this.remember(
+      'ppt/presentation.xml',
+      replaceSlideIds(
+        this.text('ppt/presentation.xml'),
+        entries.filter((item) => item !== entry).map((item) => item.tag)
+      )
+    )
+    this.remember(
+      'ppt/_rels/presentation.xml.rels',
+      removeRelationship(this.text('ppt/_rels/presentation.xml.rels'), entry.relationId)
+    )
+    const types = this.optionalText('[Content_Types].xml')
+    if (types !== undefined) {
+      this.remember('[Content_Types].xml', removeContentType(types, entry.partName))
+    }
+    this.forget(entry.partName)
+    this.forget(slideRelsName(entry.partName))
+    this.dirty = true
+    this.scenes.clear()
+  }
+
+  private insertSlide(index: number, xml: string, rels: string): void {
+    const file = this.nextSlideFile()
+    this.remember(file.part, xml)
+    this.remember(file.rels, rels)
+    this.remember(
+      'ppt/presentation.xml',
+      insertSlideId(this.text('ppt/presentation.xml'), file.relationId, index)
+    )
+    this.remember(
+      'ppt/_rels/presentation.xml.rels',
+      insertRelationship(this.text('ppt/_rels/presentation.xml.rels'), file.relationId, file.target)
+    )
+    if (this.parts.has('[Content_Types].xml') || this.edited.has('[Content_Types].xml')) {
+      this.remember(
+        '[Content_Types].xml',
+        insertContentType(this.text('[Content_Types].xml'), file.part)
+      )
+    }
+    this.dirty = true
+    this.scenes.clear()
+  }
+
+  private writeShapeText(
+    slideIndex: number,
+    shapeId: string,
+    texts: (current: readonly (readonly string[])[]) => readonly (readonly string[])[]
+  ): void {
     const slide = this.slides()[slideIndex]
     if (slide === undefined) throw new Error(`pptx: slide ${slideIndex} does not exist`)
     const xml = this.text(slide.partName)
     const shape = findShape(xml, shapeId)
     if (shape === undefined) throw new Error(`pptx: shape ${shapeId} does not exist`)
-    const next = replaceShapeText(xml.slice(shape.start, shape.end), text)
+    const raw = xml.slice(shape.start, shape.end)
+    const current = textGrid(raw)
+    if (current.length === 0) throw new Error('pptx: shape has no text')
+    const next = replaceShapeRuns(raw, texts(current))
     this.edited.set(slide.partName, xml.slice(0, shape.start) + next + xml.slice(shape.end))
     this.dirty = true
     this.scenes.delete(slideIndex)
+  }
+
+  private remember(name: string, xml: string): void {
+    this.edited.set(name, xml)
+    if (!this.order.includes(name)) this.order.push(name)
+  }
+
+  private forget(name: string): void {
+    this.edited.delete(name)
+    this.parts.delete(name)
+    this.order = this.order.filter((item) => item !== name)
+  }
+
+  private slideEntries(): SlideEntry[] {
+    const presentation = this.text('ppt/presentation.xml')
+    const relations = readRelations(this.text('ppt/_rels/presentation.xml.rels'))
+    const list = findDescendant(presentation, 'sldIdLst')
+    if (list === undefined) return []
+    const entries: SlideEntry[] = []
+    for (const slideId of childElements(presentation, list.openEnd, list.closeStart)) {
+      if (slideId.name !== 'sldId') continue
+      const relationId = attribute(slideId.attrs, 'id', true)
+      const target = relationId === undefined ? undefined : relations.get(relationId)
+      if (relationId === undefined || target === undefined || !target.type.endsWith('/slide')) {
+        continue
+      }
+      entries.push({
+        relationId,
+        tag: presentation.slice(slideId.start, slideId.end),
+        partName: resolvePart('ppt/presentation.xml', target.target)
+      })
+    }
+    return entries
+  }
+
+  private layoutTarget(partName: string): string | undefined {
+    for (const relation of this.slideRelations(partName).values()) {
+      if (relation.type.endsWith('/slideLayout')) return relation.target
+    }
+    return this.anyLayoutTarget()
+  }
+
+  private anyLayoutTarget(): string | undefined {
+    for (const name of this.order) {
+      const file = /^ppt\/slideLayouts\/(slideLayout\d+\.xml)$/.exec(name)
+      const base = file?.[1]
+      if (base !== undefined) return `../slideLayouts/${base}`
+    }
+    return undefined
+  }
+
+  private nextSlideFile(): { part: string; rels: string; target: string; relationId: string } {
+    let max = 0
+    for (const name of new Set([...this.order, ...this.edited.keys()])) {
+      const match = /^ppt\/slides\/slide(\d+)\.xml$/.exec(name)
+      if (match !== null) max = Math.max(max, Number(match[1]))
+    }
+    const number = max + 1
+    return {
+      part: `ppt/slides/slide${number}.xml`,
+      rels: `ppt/slides/_rels/slide${number}.xml.rels`,
+      target: `slides/slide${number}.xml`,
+      relationId: nextRelationId(readRelations(this.text('ppt/_rels/presentation.xml.rels')))
+    }
   }
 
   /** Original bytes when nothing changed; otherwise a new package with untouched parts copied. */
@@ -286,27 +474,274 @@ function textOf(raw: string): string {
     .join('')
 }
 
-function replaceShapeText(raw: string, text: string): string {
-  const pattern = /<([A-Za-z_][\w.-]*):t(\s[^>]*)?>([\s\S]*?)<\/\1:t>/g
-  const matches = [...raw.matchAll(pattern)]
-  if (matches.length === 0) return insertTextRun(raw, text)
-  let seen = false
-  return raw.replace(pattern, (_full, prefix: string, attrs: string | undefined) => {
-    const attributes = attrs ?? ''
-    if (seen) return `<${prefix}:t${attributes}></${prefix}:t>`
-    seen = true
-    return `<${prefix}:t${withPreserve(attributes, text)}>${escapeXml(text)}</${prefix}:t>`
-  })
+function textGrid(raw: string): string[][] {
+  const body = findDescendant(raw, 'txBody')
+  if (body === undefined) return []
+  const grid: string[][] = []
+  for (const paragraph of childElements(raw, body.openEnd, body.closeStart)) {
+    if (paragraph.name !== 'p') continue
+    const nodes = textNodesIn(raw, paragraph)
+    grid.push(
+      nodes.length === 0
+        ? ['']
+        : nodes.map((node) => decodeXml(raw.slice(node.openEnd, node.closeStart)))
+    )
+  }
+  return grid
 }
 
-function insertTextRun(raw: string, text: string): string {
-  const body = /<([A-Za-z_][\w.-]*):txBody\b/.exec(raw)
-  const paragraph = /<([A-Za-z_][\w.-]*):p(\s[^>]*)?>/.exec(raw)
-  if (body === null || paragraph === null) throw new Error('pptx: shape has no text')
-  const prefix = body[1] ?? 'a'
-  const node = `<${prefix}:r><${prefix}:t${withPreserve('', text)}>${escapeXml(text)}</${prefix}:t></${prefix}:r>`
-  const at = paragraph.index + paragraph[0].length
-  return raw.slice(0, at) + node + raw.slice(at)
+function replaceShapeRuns(raw: string, paragraphs: readonly (readonly string[])[]): string {
+  const body = findDescendant(raw, 'txBody')
+  if (body === undefined) throw new Error('pptx: shape has no text')
+  const blocks = childElements(raw, body.openEnd, body.closeStart).filter(
+    (item) => item.name === 'p'
+  )
+  const edits: Array<{ start: number; end: number; xml: string }> = []
+  blocks.forEach((paragraph, index) => {
+    const wanted = paragraphs[index] ?? ['']
+    const nodes = textNodesIn(raw, paragraph)
+    if (nodes.length === 0) {
+      const text = wanted.join('')
+      if (text.length === 0) return
+      edits.push({
+        start: paragraph.openEnd,
+        end: paragraph.openEnd,
+        xml: runXml(paragraph.prefix || 'a', text)
+      })
+      return
+    }
+    nodes.forEach((node, runIndex) => {
+      const extra = runIndex === nodes.length - 1 ? wanted.slice(nodes.length).join('') : ''
+      edits.push({
+        start: node.start,
+        end: node.end,
+        xml: textElementXml(node.prefix, node.attrs, `${wanted[runIndex] ?? ''}${extra}`)
+      })
+    })
+  })
+  const overflow = paragraphs.slice(blocks.length)
+  const last = blocks[blocks.length - 1]
+  if (overflow.length > 0 && last !== undefined) {
+    const text = overflow.map((runs) => runs.join('')).join('\n')
+    if (text.length > 0) {
+      edits.push({
+        start: last.closeStart,
+        end: last.closeStart,
+        xml: runXml(last.prefix || 'a', text)
+      })
+    }
+  }
+  let next = raw
+  for (const edit of edits.toSorted((a, b) => b.start - a.start)) {
+    next = next.slice(0, edit.start) + edit.xml + next.slice(edit.end)
+  }
+  return next
+}
+
+function textNodesIn(xml: string, element: XmlElement): XmlElement[] {
+  const found: XmlElement[] = []
+  const walk = (from: number, to: number): void => {
+    for (const child of childElements(xml, from, to)) {
+      if (child.name === 't') found.push(child)
+      else walk(child.openEnd, child.closeStart)
+    }
+  }
+  walk(element.openEnd, element.closeStart)
+  return found
+}
+
+function textElementXml(prefix: string, attrs: string, text: string): string {
+  const tag = prefix.length > 0 ? `${prefix}:t` : 't'
+  return `<${tag}${withPreserve(attrs, text)}>${escapeXml(text)}</${tag}>`
+}
+
+function runXml(prefix: string, text: string): string {
+  const run = prefix.length > 0 ? prefix : 'a'
+  return `<${run}:r>${textElementXml(run, '', text)}</${run}:r>`
+}
+
+/**
+ * Keep unchanged characters in the runs that already owned them. Inserted characters take
+ * the run before the caret when the edit sits on a run boundary.
+ */
+function distributeRuns(previous: readonly (readonly string[])[], nextPlain: string): string[][] {
+  const nextLines = nextPlain.split('\n')
+  if (previous.length === 0) return nextLines.map((line) => [line])
+  if (nextLines.length === previous.length) {
+    return previous.map((runs, index) => distributeParagraph(runs, nextLines[index] ?? ''))
+  }
+  const head = previous.slice(0, -1)
+  const tail = previous[previous.length - 1] ?? ['']
+  return [
+    ...head.map((runs, index) => distributeParagraph(runs, nextLines[index] ?? '')),
+    distributeParagraph(tail, nextLines.slice(head.length).join('\n'))
+  ]
+}
+
+function distributeParagraph(runs: readonly string[], next: string): string[] {
+  if (runs.length <= 1) return [next]
+  const previous = runs.join('')
+  let prefix = 0
+  const shared = Math.min(previous.length, next.length)
+  while (prefix < shared && previous[prefix] === next[prefix]) prefix += 1
+  let suffix = 0
+  while (
+    suffix < previous.length - prefix &&
+    suffix < next.length - prefix &&
+    previous[previous.length - 1 - suffix] === next[next.length - 1 - suffix]
+  ) {
+    suffix += 1
+  }
+  const owners = runOwners(runs)
+  const insertAt = prefix >= previous.length ? runs.length - 1 : boundaryRun(owners, prefix)
+  const buckets = runs.map(() => '')
+  const push = (run: number, char: string): void => {
+    buckets[run] = `${buckets[run] ?? ''}${char}`
+  }
+  for (let index = 0; index < prefix; index += 1) push(owners[index] ?? 0, next[index] ?? '')
+  for (let index = prefix; index < next.length - suffix; index += 1)
+    push(insertAt, next[index] ?? '')
+  for (let index = 0; index < suffix; index += 1) {
+    const oldIndex = previous.length - suffix + index
+    push(owners[oldIndex] ?? runs.length - 1, next[next.length - suffix + index] ?? '')
+  }
+  return buckets
+}
+
+function runOwners(runs: readonly string[]): number[] {
+  const owners: number[] = []
+  runs.forEach((text, index) => {
+    for (let cursor = 0; cursor < text.length; cursor += 1) owners.push(index)
+  })
+  return owners
+}
+
+function boundaryRun(owners: readonly number[], prefix: number): number {
+  const at = owners[prefix] ?? 0
+  if (prefix === 0) return at
+  const before = owners[prefix - 1] ?? at
+  return before === at ? at : before
+}
+
+function blankSlide(): string {
+  return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<p:sld xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main">
+<p:cSld><p:spTree>
+<p:nvGrpSpPr><p:cNvPr id="1" name=""/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr>
+<p:grpSpPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="0" cy="0"/><a:chOff x="0" y="0"/><a:chExt cx="0" cy="0"/></a:xfrm></p:grpSpPr>
+</p:spTree></p:cSld>
+<p:clrMapOvr><a:masterClrMapping/></p:clrMapOvr>
+</p:sld>`
+}
+
+function slideRelsName(partName: string): string {
+  const slash = partName.lastIndexOf('/')
+  return `${partName.slice(0, slash)}/_rels/${partName.slice(slash + 1)}.rels`
+}
+
+function slideRelationships(layout: string | undefined): string {
+  const relationship =
+    layout === undefined
+      ? ''
+      : `<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideLayout" Target="${escapeXml(layout)}"/>`
+  return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">${relationship}</Relationships>`
+}
+
+function replaceSlideIds(presentation: string, tags: readonly string[]): string {
+  const list = findDescendant(presentation, 'sldIdLst')
+  if (list === undefined) return presentation
+  return presentation.slice(0, list.openEnd) + tags.join('') + presentation.slice(list.closeStart)
+}
+
+function removeRelationship(xml: string, id: string): string {
+  const root = findDescendant(xml, 'Relationships')
+  if (root === undefined) return xml
+  const matches = childElements(xml, root.openEnd, root.closeStart).filter(
+    (item) => item.name === 'Relationship' && attribute(item.attrs, 'Id') === id
+  )
+  let next = xml
+  for (const item of matches.toReversed()) next = next.slice(0, item.start) + next.slice(item.end)
+  return next
+}
+
+function removeContentType(xml: string, partName: string): string {
+  const types = findDescendant(xml, 'Types')
+  if (types === undefined) return xml
+  const matches = childElements(xml, types.openEnd, types.closeStart).filter(
+    (item) => item.name === 'Override' && attribute(item.attrs, 'PartName') === `/${partName}`
+  )
+  let next = xml
+  for (const item of matches.toReversed()) next = next.slice(0, item.start) + next.slice(item.end)
+  return next
+}
+
+function insertSlideId(presentation: string, relationId: string, index: number): string {
+  const list = findDescendant(presentation, 'sldIdLst')
+  const id = nextSlideId(presentation)
+  const prefix = relationPrefix(presentation)
+  const tag = `<p:sldId id="${id}" ${prefix}:id="${relationId}"/>`
+  if (list === undefined) {
+    const root = findDescendant(presentation, 'presentation')
+    const at = root?.openEnd ?? presentation.length
+    return `${presentation.slice(0, at)}<p:sldIdLst>${tag}</p:sldIdLst>${presentation.slice(at)}`
+  }
+  const ids = childElements(presentation, list.openEnd, list.closeStart).filter(
+    (item) => item.name === 'sldId'
+  )
+  const anchor = index <= 0 ? undefined : ids[index - 1]
+  const at = anchor?.end ?? (index <= 0 ? list.openEnd : list.closeStart)
+  return presentation.slice(0, at) + tag + presentation.slice(at)
+}
+
+function nextSlideId(presentation: string): number {
+  let max = 255
+  const list = findDescendant(presentation, 'sldIdLst')
+  if (list === undefined) return 256
+  for (const item of childElements(presentation, list.openEnd, list.closeStart)) {
+    if (item.name !== 'sldId') continue
+    const id = Number(attribute(item.attrs, 'id') ?? 0)
+    if (Number.isFinite(id)) max = Math.max(max, id)
+  }
+  return max + 1
+}
+
+function relationPrefix(presentation: string): string {
+  const list = findDescendant(presentation, 'sldIdLst')
+  if (list === undefined) return 'r'
+  for (const item of childElements(presentation, list.openEnd, list.closeStart)) {
+    if (item.name !== 'sldId') continue
+    const prefixed = parseAttributes(item.attrs).find(
+      (attr) => attr.name === 'id' && attr.prefix !== ''
+    )
+    if (prefixed !== undefined) return prefixed.prefix
+  }
+  return 'r'
+}
+
+function insertRelationship(xml: string, id: string, target: string): string {
+  const tag = `<Relationship Id="${id}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide" Target="${escapeXml(target)}"/>`
+  const close = xml.lastIndexOf('</Relationships>')
+  if (close < 0) throw new Error('pptx: presentation relationships are missing')
+  return xml.slice(0, close) + tag + xml.slice(close)
+}
+
+function insertContentType(xml: string, partName: string): string {
+  const part = `/${partName}`
+  if (xml.includes(`PartName="${part}"`)) return xml
+  const tag = `<Override PartName="${part}" ContentType="application/vnd.openxmlformats-officedocument.presentationml.slide+xml"/>`
+  const close = xml.lastIndexOf('</Types>')
+  if (close < 0) return xml
+  return xml.slice(0, close) + tag + xml.slice(close)
+}
+
+function nextRelationId(relations: Map<string, { type: string; target: string }>): string {
+  let max = 0
+  for (const id of relations.keys()) {
+    const number = Number(/^rId(\d+)$/.exec(id)?.[1] ?? 0)
+    if (number > max) max = number
+  }
+  return `rId${max + 1}`
 }
 
 function withPreserve(attrs: string, text: string): string {

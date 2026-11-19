@@ -1691,7 +1691,7 @@ var PptxDocument = class _PptxDocument {
   constructor(original, parts, order) {
     this.original = original;
     this.parts = parts;
-    this.order = order;
+    this.order = [...order];
   }
   static async open(input) {
     const bytes = input.slice();
@@ -1745,19 +1745,177 @@ var PptxDocument = class _PptxDocument {
     return bytes === void 0 ? void 0 : bytes.slice();
   }
   /**
-   * Replace the visible text of one shape. The first text node keeps its run properties and
-   * receives the whole string; later text nodes in that shape become empty.
+   * Replace the visible text of one shape. Characters that did not change stay in their
+   * original runs, so a later run such as a unit keeps its size, weight, and color.
    */
   setShapeText(slideIndex, shapeId, text) {
+    this.writeShapeText(slideIndex, shapeId, (current) => distributeRuns(current, text));
+  }
+  /** Write one string per existing run. Run properties in the package are left untouched. */
+  setShapeRuns(slideIndex, shapeId, paragraphs2) {
+    this.writeShapeText(slideIndex, shapeId, () => paragraphs2.map((runs) => [...runs]));
+  }
+  /**
+   * Append a blank slide, using the layout of `layoutFromIndex` so the deck template stays
+   * in effect. Returns the new slide index.
+   */
+  addSlide(layoutFromIndex) {
+    const existing = this.slides();
+    const index = existing.length;
+    const source = existing[Math.min(Math.max(layoutFromIndex, 0), Math.max(existing.length - 1, 0))];
+    const layout = source === void 0 ? this.anyLayoutTarget() : this.layoutTarget(source.partName);
+    this.insertSlide(index, blankSlide(), slideRelationships(layout));
+    return index;
+  }
+  /** Insert an identical copy immediately after `index`. Returns the copy's index. */
+  duplicateSlide(index) {
+    const source = this.slideEntries()[index];
+    if (source === void 0) throw new Error(`pptx: slide ${index} does not exist`);
+    const rels = this.optionalText(slideRelsName(source.partName)) ?? slideRelationships(void 0);
+    this.insertSlide(index + 1, this.text(source.partName), rels);
+    return index + 1;
+  }
+  /**
+   * Move the slide at `fromIndex` so it occupies `toIndex`.
+   * Both indexes are positions in the current slide list.
+   */
+  moveSlide(fromIndex, toIndex) {
+    const entries = this.slideEntries();
+    if (entries[fromIndex] === void 0) throw new Error(`pptx: slide ${fromIndex} does not exist`);
+    if (entries[toIndex] === void 0) throw new Error(`pptx: slide ${toIndex} does not exist`);
+    if (fromIndex === toIndex) return;
+    const next = entries.slice();
+    const [moved] = next.splice(fromIndex, 1);
+    if (moved === void 0) return;
+    next.splice(toIndex, 0, moved);
+    this.remember(
+      "ppt/presentation.xml",
+      replaceSlideIds(
+        this.text("ppt/presentation.xml"),
+        next.map((entry) => entry.tag)
+      )
+    );
+    this.dirty = true;
+    this.scenes.clear();
+  }
+  /** Remove one slide. A deck must keep its last slide. */
+  deleteSlide(index) {
+    const entries = this.slideEntries();
+    const entry = entries[index];
+    if (entry === void 0) throw new Error(`pptx: slide ${index} does not exist`);
+    if (entries.length <= 1) throw new Error("pptx: the only slide cannot be deleted");
+    this.remember(
+      "ppt/presentation.xml",
+      replaceSlideIds(
+        this.text("ppt/presentation.xml"),
+        entries.filter((item) => item !== entry).map((item) => item.tag)
+      )
+    );
+    this.remember(
+      "ppt/_rels/presentation.xml.rels",
+      removeRelationship(this.text("ppt/_rels/presentation.xml.rels"), entry.relationId)
+    );
+    const types = this.optionalText("[Content_Types].xml");
+    if (types !== void 0) {
+      this.remember("[Content_Types].xml", removeContentType(types, entry.partName));
+    }
+    this.forget(entry.partName);
+    this.forget(slideRelsName(entry.partName));
+    this.dirty = true;
+    this.scenes.clear();
+  }
+  insertSlide(index, xml, rels) {
+    const file = this.nextSlideFile();
+    this.remember(file.part, xml);
+    this.remember(file.rels, rels);
+    this.remember(
+      "ppt/presentation.xml",
+      insertSlideId(this.text("ppt/presentation.xml"), file.relationId, index)
+    );
+    this.remember(
+      "ppt/_rels/presentation.xml.rels",
+      insertRelationship(this.text("ppt/_rels/presentation.xml.rels"), file.relationId, file.target)
+    );
+    if (this.parts.has("[Content_Types].xml") || this.edited.has("[Content_Types].xml")) {
+      this.remember(
+        "[Content_Types].xml",
+        insertContentType(this.text("[Content_Types].xml"), file.part)
+      );
+    }
+    this.dirty = true;
+    this.scenes.clear();
+  }
+  writeShapeText(slideIndex, shapeId, texts) {
     const slide = this.slides()[slideIndex];
     if (slide === void 0) throw new Error(`pptx: slide ${slideIndex} does not exist`);
     const xml = this.text(slide.partName);
     const shape = findShape(xml, shapeId);
     if (shape === void 0) throw new Error(`pptx: shape ${shapeId} does not exist`);
-    const next = replaceShapeText(xml.slice(shape.start, shape.end), text);
+    const raw = xml.slice(shape.start, shape.end);
+    const current = textGrid(raw);
+    if (current.length === 0) throw new Error("pptx: shape has no text");
+    const next = replaceShapeRuns(raw, texts(current));
     this.edited.set(slide.partName, xml.slice(0, shape.start) + next + xml.slice(shape.end));
     this.dirty = true;
     this.scenes.delete(slideIndex);
+  }
+  remember(name, xml) {
+    this.edited.set(name, xml);
+    if (!this.order.includes(name)) this.order.push(name);
+  }
+  forget(name) {
+    this.edited.delete(name);
+    this.parts.delete(name);
+    this.order = this.order.filter((item) => item !== name);
+  }
+  slideEntries() {
+    const presentation = this.text("ppt/presentation.xml");
+    const relations = readRelations(this.text("ppt/_rels/presentation.xml.rels"));
+    const list = findDescendant(presentation, "sldIdLst");
+    if (list === void 0) return [];
+    const entries = [];
+    for (const slideId of childElements(presentation, list.openEnd, list.closeStart)) {
+      if (slideId.name !== "sldId") continue;
+      const relationId = attribute(slideId.attrs, "id", true);
+      const target = relationId === void 0 ? void 0 : relations.get(relationId);
+      if (relationId === void 0 || target === void 0 || !target.type.endsWith("/slide")) {
+        continue;
+      }
+      entries.push({
+        relationId,
+        tag: presentation.slice(slideId.start, slideId.end),
+        partName: resolvePart("ppt/presentation.xml", target.target)
+      });
+    }
+    return entries;
+  }
+  layoutTarget(partName) {
+    for (const relation of this.slideRelations(partName).values()) {
+      if (relation.type.endsWith("/slideLayout")) return relation.target;
+    }
+    return this.anyLayoutTarget();
+  }
+  anyLayoutTarget() {
+    for (const name of this.order) {
+      const file = /^ppt\/slideLayouts\/(slideLayout\d+\.xml)$/.exec(name);
+      const base = file?.[1];
+      if (base !== void 0) return `../slideLayouts/${base}`;
+    }
+    return void 0;
+  }
+  nextSlideFile() {
+    let max = 0;
+    for (const name of /* @__PURE__ */ new Set([...this.order, ...this.edited.keys()])) {
+      const match = /^ppt\/slides\/slide(\d+)\.xml$/.exec(name);
+      if (match !== null) max = Math.max(max, Number(match[1]));
+    }
+    const number = max + 1;
+    return {
+      part: `ppt/slides/slide${number}.xml`,
+      rels: `ppt/slides/_rels/slide${number}.xml.rels`,
+      target: `slides/slide${number}.xml`,
+      relationId: nextRelationId(readRelations(this.text("ppt/_rels/presentation.xml.rels")))
+    };
   }
   /** Original bytes when nothing changed; otherwise a new package with untouched parts copied. */
   async save() {
@@ -1874,26 +2032,241 @@ function shapeName(xml, element) {
 function textOf(raw) {
   return [...raw.matchAll(/<([A-Za-z_][\w.-]*):t(?:\s[^>]*)?>([\s\S]*?)<\/\1:t>/g)].map((match) => decodeXml(match[2] ?? "")).join("");
 }
-function replaceShapeText(raw, text) {
-  const pattern = /<([A-Za-z_][\w.-]*):t(\s[^>]*)?>([\s\S]*?)<\/\1:t>/g;
-  const matches = [...raw.matchAll(pattern)];
-  if (matches.length === 0) return insertTextRun(raw, text);
-  let seen = false;
-  return raw.replace(pattern, (_full, prefix, attrs) => {
-    const attributes = attrs ?? "";
-    if (seen) return `<${prefix}:t${attributes}></${prefix}:t>`;
-    seen = true;
-    return `<${prefix}:t${withPreserve(attributes, text)}>${escapeXml(text)}</${prefix}:t>`;
-  });
+function textGrid(raw) {
+  const body = findDescendant(raw, "txBody");
+  if (body === void 0) return [];
+  const grid = [];
+  for (const paragraph of childElements(raw, body.openEnd, body.closeStart)) {
+    if (paragraph.name !== "p") continue;
+    const nodes = textNodesIn(raw, paragraph);
+    grid.push(
+      nodes.length === 0 ? [""] : nodes.map((node) => decodeXml(raw.slice(node.openEnd, node.closeStart)))
+    );
+  }
+  return grid;
 }
-function insertTextRun(raw, text) {
-  const body = /<([A-Za-z_][\w.-]*):txBody\b/.exec(raw);
-  const paragraph = /<([A-Za-z_][\w.-]*):p(\s[^>]*)?>/.exec(raw);
-  if (body === null || paragraph === null) throw new Error("pptx: shape has no text");
-  const prefix = body[1] ?? "a";
-  const node = `<${prefix}:r><${prefix}:t${withPreserve("", text)}>${escapeXml(text)}</${prefix}:t></${prefix}:r>`;
-  const at = paragraph.index + paragraph[0].length;
-  return raw.slice(0, at) + node + raw.slice(at);
+function replaceShapeRuns(raw, paragraphs2) {
+  const body = findDescendant(raw, "txBody");
+  if (body === void 0) throw new Error("pptx: shape has no text");
+  const blocks = childElements(raw, body.openEnd, body.closeStart).filter(
+    (item) => item.name === "p"
+  );
+  const edits = [];
+  blocks.forEach((paragraph, index) => {
+    const wanted = paragraphs2[index] ?? [""];
+    const nodes = textNodesIn(raw, paragraph);
+    if (nodes.length === 0) {
+      const text = wanted.join("");
+      if (text.length === 0) return;
+      edits.push({
+        start: paragraph.openEnd,
+        end: paragraph.openEnd,
+        xml: runXml(paragraph.prefix || "a", text)
+      });
+      return;
+    }
+    nodes.forEach((node, runIndex) => {
+      const extra = runIndex === nodes.length - 1 ? wanted.slice(nodes.length).join("") : "";
+      edits.push({
+        start: node.start,
+        end: node.end,
+        xml: textElementXml(node.prefix, node.attrs, `${wanted[runIndex] ?? ""}${extra}`)
+      });
+    });
+  });
+  const overflow = paragraphs2.slice(blocks.length);
+  const last = blocks[blocks.length - 1];
+  if (overflow.length > 0 && last !== void 0) {
+    const text = overflow.map((runs) => runs.join("")).join("\n");
+    if (text.length > 0) {
+      edits.push({
+        start: last.closeStart,
+        end: last.closeStart,
+        xml: runXml(last.prefix || "a", text)
+      });
+    }
+  }
+  let next = raw;
+  for (const edit of edits.toSorted((a, b) => b.start - a.start)) {
+    next = next.slice(0, edit.start) + edit.xml + next.slice(edit.end);
+  }
+  return next;
+}
+function textNodesIn(xml, element) {
+  const found = [];
+  const walk = (from, to) => {
+    for (const child of childElements(xml, from, to)) {
+      if (child.name === "t") found.push(child);
+      else walk(child.openEnd, child.closeStart);
+    }
+  };
+  walk(element.openEnd, element.closeStart);
+  return found;
+}
+function textElementXml(prefix, attrs, text) {
+  const tag = prefix.length > 0 ? `${prefix}:t` : "t";
+  return `<${tag}${withPreserve(attrs, text)}>${escapeXml(text)}</${tag}>`;
+}
+function runXml(prefix, text) {
+  const run = prefix.length > 0 ? prefix : "a";
+  return `<${run}:r>${textElementXml(run, "", text)}</${run}:r>`;
+}
+function distributeRuns(previous, nextPlain) {
+  const nextLines = nextPlain.split("\n");
+  if (previous.length === 0) return nextLines.map((line) => [line]);
+  if (nextLines.length === previous.length) {
+    return previous.map((runs, index) => distributeParagraph(runs, nextLines[index] ?? ""));
+  }
+  const head = previous.slice(0, -1);
+  const tail = previous[previous.length - 1] ?? [""];
+  return [
+    ...head.map((runs, index) => distributeParagraph(runs, nextLines[index] ?? "")),
+    distributeParagraph(tail, nextLines.slice(head.length).join("\n"))
+  ];
+}
+function distributeParagraph(runs, next) {
+  if (runs.length <= 1) return [next];
+  const previous = runs.join("");
+  let prefix = 0;
+  const shared = Math.min(previous.length, next.length);
+  while (prefix < shared && previous[prefix] === next[prefix]) prefix += 1;
+  let suffix = 0;
+  while (suffix < previous.length - prefix && suffix < next.length - prefix && previous[previous.length - 1 - suffix] === next[next.length - 1 - suffix]) {
+    suffix += 1;
+  }
+  const owners = runOwners(runs);
+  const insertAt = prefix >= previous.length ? runs.length - 1 : boundaryRun(owners, prefix);
+  const buckets = runs.map(() => "");
+  const push = (run, char) => {
+    buckets[run] = `${buckets[run] ?? ""}${char}`;
+  };
+  for (let index = 0; index < prefix; index += 1) push(owners[index] ?? 0, next[index] ?? "");
+  for (let index = prefix; index < next.length - suffix; index += 1)
+    push(insertAt, next[index] ?? "");
+  for (let index = 0; index < suffix; index += 1) {
+    const oldIndex = previous.length - suffix + index;
+    push(owners[oldIndex] ?? runs.length - 1, next[next.length - suffix + index] ?? "");
+  }
+  return buckets;
+}
+function runOwners(runs) {
+  const owners = [];
+  runs.forEach((text, index) => {
+    for (let cursor = 0; cursor < text.length; cursor += 1) owners.push(index);
+  });
+  return owners;
+}
+function boundaryRun(owners, prefix) {
+  const at = owners[prefix] ?? 0;
+  if (prefix === 0) return at;
+  const before = owners[prefix - 1] ?? at;
+  return before === at ? at : before;
+}
+function blankSlide() {
+  return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<p:sld xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main">
+<p:cSld><p:spTree>
+<p:nvGrpSpPr><p:cNvPr id="1" name=""/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr>
+<p:grpSpPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="0" cy="0"/><a:chOff x="0" y="0"/><a:chExt cx="0" cy="0"/></a:xfrm></p:grpSpPr>
+</p:spTree></p:cSld>
+<p:clrMapOvr><a:masterClrMapping/></p:clrMapOvr>
+</p:sld>`;
+}
+function slideRelsName(partName) {
+  const slash = partName.lastIndexOf("/");
+  return `${partName.slice(0, slash)}/_rels/${partName.slice(slash + 1)}.rels`;
+}
+function slideRelationships(layout) {
+  const relationship = layout === void 0 ? "" : `<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideLayout" Target="${escapeXml(layout)}"/>`;
+  return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">${relationship}</Relationships>`;
+}
+function replaceSlideIds(presentation, tags) {
+  const list = findDescendant(presentation, "sldIdLst");
+  if (list === void 0) return presentation;
+  return presentation.slice(0, list.openEnd) + tags.join("") + presentation.slice(list.closeStart);
+}
+function removeRelationship(xml, id) {
+  const root = findDescendant(xml, "Relationships");
+  if (root === void 0) return xml;
+  const matches = childElements(xml, root.openEnd, root.closeStart).filter(
+    (item) => item.name === "Relationship" && attribute(item.attrs, "Id") === id
+  );
+  let next = xml;
+  for (const item of matches.toReversed()) next = next.slice(0, item.start) + next.slice(item.end);
+  return next;
+}
+function removeContentType(xml, partName) {
+  const types = findDescendant(xml, "Types");
+  if (types === void 0) return xml;
+  const matches = childElements(xml, types.openEnd, types.closeStart).filter(
+    (item) => item.name === "Override" && attribute(item.attrs, "PartName") === `/${partName}`
+  );
+  let next = xml;
+  for (const item of matches.toReversed()) next = next.slice(0, item.start) + next.slice(item.end);
+  return next;
+}
+function insertSlideId(presentation, relationId, index) {
+  const list = findDescendant(presentation, "sldIdLst");
+  const id = nextSlideId(presentation);
+  const prefix = relationPrefix(presentation);
+  const tag = `<p:sldId id="${id}" ${prefix}:id="${relationId}"/>`;
+  if (list === void 0) {
+    const root = findDescendant(presentation, "presentation");
+    const at2 = root?.openEnd ?? presentation.length;
+    return `${presentation.slice(0, at2)}<p:sldIdLst>${tag}</p:sldIdLst>${presentation.slice(at2)}`;
+  }
+  const ids = childElements(presentation, list.openEnd, list.closeStart).filter(
+    (item) => item.name === "sldId"
+  );
+  const anchor = index <= 0 ? void 0 : ids[index - 1];
+  const at = anchor?.end ?? (index <= 0 ? list.openEnd : list.closeStart);
+  return presentation.slice(0, at) + tag + presentation.slice(at);
+}
+function nextSlideId(presentation) {
+  let max = 255;
+  const list = findDescendant(presentation, "sldIdLst");
+  if (list === void 0) return 256;
+  for (const item of childElements(presentation, list.openEnd, list.closeStart)) {
+    if (item.name !== "sldId") continue;
+    const id = Number(attribute(item.attrs, "id") ?? 0);
+    if (Number.isFinite(id)) max = Math.max(max, id);
+  }
+  return max + 1;
+}
+function relationPrefix(presentation) {
+  const list = findDescendant(presentation, "sldIdLst");
+  if (list === void 0) return "r";
+  for (const item of childElements(presentation, list.openEnd, list.closeStart)) {
+    if (item.name !== "sldId") continue;
+    const prefixed = parseAttributes(item.attrs).find(
+      (attr) => attr.name === "id" && attr.prefix !== ""
+    );
+    if (prefixed !== void 0) return prefixed.prefix;
+  }
+  return "r";
+}
+function insertRelationship(xml, id, target) {
+  const tag = `<Relationship Id="${id}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide" Target="${escapeXml(target)}"/>`;
+  const close = xml.lastIndexOf("</Relationships>");
+  if (close < 0) throw new Error("pptx: presentation relationships are missing");
+  return xml.slice(0, close) + tag + xml.slice(close);
+}
+function insertContentType(xml, partName) {
+  const part = `/${partName}`;
+  if (xml.includes(`PartName="${part}"`)) return xml;
+  const tag = `<Override PartName="${part}" ContentType="application/vnd.openxmlformats-officedocument.presentationml.slide+xml"/>`;
+  const close = xml.lastIndexOf("</Types>");
+  if (close < 0) return xml;
+  return xml.slice(0, close) + tag + xml.slice(close);
+}
+function nextRelationId(relations) {
+  let max = 0;
+  for (const id of relations.keys()) {
+    const number = Number(/^rId(\d+)$/.exec(id)?.[1] ?? 0);
+    if (number > max) max = number;
+  }
+  return `rId${max + 1}`;
 }
 function withPreserve(attrs, text) {
   if (!/^\s|\s$|\n/.test(text) || attrs.includes("xml:space")) return attrs;
@@ -1921,28 +2294,71 @@ var page = {
   editing: false,
   editorShape: void 0,
   thumbIndex: -1,
-  images: /* @__PURE__ */ new Map()
+  images: /* @__PURE__ */ new Map(),
+  saved: null,
+  dirty: false,
+  label: "",
+  servedName: null,
+  handle: null
 };
 var pressing = false;
+var painting = false;
+var plainOpen = readPlainOpen();
+var menuIndex = -1;
+var drag = null;
 var openButton = document.querySelector("#open");
 var fileInput = document.querySelector("#file");
 var fileName = document.querySelector("#file-name");
 var saveButton = document.querySelector("#save");
+var discardButton = document.querySelector("#discard");
+var addButton = document.querySelector("#add-slide");
 var thumbs = document.querySelector("#thumbs");
+var slideMenu = document.querySelector("#slide-menu");
+var copySlideButton = document.querySelector("#copy-slide");
+var deleteSlideButton = document.querySelector("#delete-slide");
 var sheet = document.querySelector("#sheet");
 var canvas = document.querySelector("#slide");
 var editorFrame = document.querySelector("#editor-frame");
 var editor = document.querySelector("#editor");
 var context = canvas?.getContext("2d");
-openButton?.addEventListener("click", () => fileInput?.click());
+openButton?.addEventListener("click", () => {
+  if (plainOpen || filePicker() === void 0 || embeddedFrame()) choosePlainFile();
+  else void pickFile();
+});
 fileInput?.addEventListener("change", () => {
   const file = fileInput.files?.[0];
+  fileInput.value = "";
   if (file !== void 0) void openFile(file);
 });
 saveButton?.addEventListener("click", () => {
-  const doc = page.doc;
-  if (doc === null) return;
-  void doc.save().then((bytes) => download(bytes));
+  void saveCurrent();
+});
+discardButton?.addEventListener("click", () => {
+  void discardEdits();
+});
+addButton?.addEventListener("click", () => {
+  addSlide();
+});
+copySlideButton?.addEventListener("click", () => {
+  const index = menuIndex;
+  hideMenu();
+  duplicateAt(index);
+});
+deleteSlideButton?.addEventListener("click", () => {
+  const index = menuIndex;
+  hideMenu();
+  deleteAt(index);
+});
+document.addEventListener("pointerdown", (event) => {
+  if (slideMenu === null || slideMenu.hidden) return;
+  if (event.target instanceof Node && slideMenu.contains(event.target)) return;
+  hideMenu();
+});
+window.addEventListener("keydown", (event) => {
+  if (event.key === "Escape") hideMenu();
+});
+thumbs?.addEventListener("scroll", () => {
+  hideMenu();
 });
 sheet?.addEventListener("pointerdown", (event) => {
   if (event.button !== 0 || canvas === null || !(event.target instanceof Node)) return;
@@ -1974,17 +2390,16 @@ canvas?.addEventListener("mousemove", (event) => {
   const shape = hitTest(event.offsetX, event.offsetY);
   canvas.style.cursor = shape?.editable === true ? "text" : "default";
 });
-editor?.addEventListener("input", () => {
-  const doc = page.doc;
-  const shape = selected();
-  if (doc === null || editor === null || shape === void 0 || !shape.editable) return;
-  try {
-    doc.setShapeText(page.slideIndex, shape.id, editor.textContent ?? "");
-  } catch (error) {
-    note(error instanceof Error ? error.message : "\u65E0\u6CD5\u4FEE\u6539\u6587\u5B57");
-    return;
-  }
-  render();
+editor?.addEventListener("input", (event) => {
+  if (event.isComposing) return;
+  commitEditor();
+});
+editor?.addEventListener("compositionend", () => {
+  commitEditor();
+});
+editor?.addEventListener("paste", (event) => {
+  event.preventDefault();
+  insertPlain(event.clipboardData?.getData("text/plain") ?? "");
 });
 editor?.addEventListener("beforeinput", (event) => {
   if (event.inputType !== "insertParagraph" && event.inputType !== "insertLineBreak") return;
@@ -2013,8 +2428,7 @@ document.body.addEventListener("dragover", (event) => {
 });
 document.body.addEventListener("drop", (event) => {
   event.preventDefault();
-  const file = event.dataTransfer?.files[0];
-  if (file !== void 0) void openFile(file);
+  void openDropped(event);
 });
 var requested = new URLSearchParams(location.search).get("open");
 if (requested !== null && safeFileName(requested)) void openRequested(requested);
@@ -2022,31 +2436,256 @@ async function openRequested(name) {
   try {
     const response = await fetch(encodeURIComponent(name));
     if (!response.ok) throw new Error("pptx: \u627E\u4E0D\u5230\u8FD9\u4E2A\u6587\u4EF6");
-    await openFile(new File([await response.arrayBuffer()], name));
+    page.handle = null;
+    page.servedName = name;
+    await openBytes(new Uint8Array(await response.arrayBuffer()), name);
   } catch (error) {
     note(error instanceof Error ? error.message : "\u65E0\u6CD5\u6253\u5F00\u8FD9\u4E2A\u6587\u4EF6");
   }
 }
-async function openFile(file) {
+function embeddedFrame() {
   try {
-    page.doc = await openPptx(new Uint8Array(await file.arrayBuffer()));
+    return window.self !== window.top;
+  } catch {
+    return true;
+  }
+}
+function filePicker() {
+  return window.showOpenFilePicker;
+}
+function readPlainOpen() {
+  try {
+    return sessionStorage.getItem("pptx-plain-open") === "1";
+  } catch {
+    return false;
+  }
+}
+function usePlainOpen() {
+  plainOpen = true;
+  try {
+    sessionStorage.setItem("pptx-plain-open", "1");
+  } catch {
+  }
+}
+function choosePlainFile() {
+  if (fileInput === null) return;
+  fileInput.value = "";
+  fileInput.click();
+}
+function accessDenied(error) {
+  if (error instanceof DOMException && (error.name === "NotAllowedError" || error.name === "SecurityError")) {
+    return true;
+  }
+  return error instanceof Error && error.message.includes("not allowed");
+}
+async function pickFile() {
+  const picker = filePicker();
+  if (picker === void 0) {
+    usePlainOpen();
+    choosePlainFile();
+    return;
+  }
+  try {
+    const [handle] = await picker({
+      types: [
+        {
+          description: "PowerPoint",
+          accept: {
+            "application/vnd.openxmlformats-officedocument.presentationml.presentation": [".pptx"]
+          }
+        }
+      ]
+    });
+    if (handle === void 0) return;
+    let file;
+    try {
+      file = await handle.getFile();
+    } catch (error) {
+      if (!accessDenied(error)) throw error;
+      usePlainOpen();
+      page.handle = null;
+      choosePlainFile();
+      return;
+    }
+    page.handle = handle;
+    page.servedName = null;
+    await openBytes(new Uint8Array(await file.arrayBuffer()), handle.name);
+  } catch (error) {
+    if (error instanceof DOMException && error.name === "AbortError") return;
+    if (accessDenied(error)) {
+      usePlainOpen();
+      choosePlainFile();
+      return;
+    }
+    note(error instanceof Error ? error.message : "\u65E0\u6CD5\u6253\u5F00\u8FD9\u4E2A\u6587\u4EF6");
+  }
+}
+async function openDropped(event) {
+  const item = event.dataTransfer?.items[0];
+  const readable = item;
+  const handle = await readable?.getAsFileSystemHandle?.();
+  const file = item?.getAsFile() ?? event.dataTransfer?.files[0];
+  if (file === void 0) return;
+  page.handle = handle ?? null;
+  page.servedName = null;
+  await openBytes(new Uint8Array(await file.arrayBuffer()), file.name);
+}
+async function openFile(file) {
+  page.handle = null;
+  page.servedName = null;
+  await openBytes(new Uint8Array(await file.arrayBuffer()), file.name);
+}
+async function openBytes(bytes, label) {
+  const saved = bytes.slice();
+  try {
+    page.doc = await openPptx(saved);
   } catch (error) {
     page.doc = null;
+    page.saved = null;
+    clearDirty();
     if (saveButton !== null) saveButton.disabled = true;
+    if (addButton !== null) addButton.disabled = true;
     note(error instanceof Error ? error.message : "\u65E0\u6CD5\u6253\u5F00\u8FD9\u4E2A\u6587\u4EF6");
     render();
     return;
   }
+  page.saved = saved;
+  page.label = label;
   page.slideIndex = 0;
   page.selectedId = void 0;
   page.editing = false;
   page.editorShape = void 0;
   page.thumbIndex = -1;
   page.images.clear();
+  clearDirty();
   if (saveButton !== null) saveButton.disabled = false;
-  note(file.name);
+  if (addButton !== null) addButton.disabled = false;
+  note(label);
   await loadImages();
   render();
+}
+async function saveCurrent() {
+  const doc = page.doc;
+  if (doc === null || saveButton === null || saveButton.disabled) return;
+  saveButton.disabled = true;
+  try {
+    const bytes = await doc.save();
+    await writeCurrent(bytes);
+    page.saved = bytes.slice();
+    const index = page.slideIndex;
+    const selectedId = page.selectedId;
+    page.doc = await openPptx(bytes.slice());
+    page.slideIndex = Math.min(index, Math.max(page.doc.slides().length - 1, 0));
+    page.selectedId = selectedId;
+    page.editing = false;
+    page.editorShape = void 0;
+    clearDirty();
+    note(page.label.length > 0 ? page.label : "\u5DF2\u4FDD\u5B58");
+    await loadImages();
+    render();
+  } catch (error) {
+    note(error instanceof Error ? error.message : "\u65E0\u6CD5\u4FDD\u5B58");
+  } finally {
+    if (page.doc !== null) saveButton.disabled = false;
+  }
+}
+async function writeCurrent(bytes) {
+  const body = new Blob([toBuffer(bytes)], {
+    type: "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+  });
+  if (page.handle !== null) {
+    const writable = await page.handle.createWritable();
+    await writable.write(body);
+    await writable.close();
+    return;
+  }
+  if (page.servedName !== null) {
+    const response = await fetch(`/save?name=${encodeURIComponent(page.servedName)}`, {
+      method: "POST",
+      body
+    });
+    if (!response.ok) throw new Error("\u65E0\u6CD5\u8986\u76D6\u5F53\u524D\u6587\u4EF6");
+    return;
+  }
+  throw new Error("\u8BF7\u7528\u300C\u6253\u5F00\u300D\u9009\u62E9\u6587\u4EF6\u540E\u518D\u4FDD\u5B58");
+}
+async function discardEdits() {
+  if (page.saved === null || !page.dirty) return;
+  const index = page.slideIndex;
+  page.doc = await openPptx(page.saved.slice());
+  page.slideIndex = Math.min(index, Math.max(page.doc.slides().length - 1, 0));
+  page.selectedId = void 0;
+  page.editing = false;
+  page.editorShape = void 0;
+  page.thumbIndex = -1;
+  page.images.clear();
+  clearDirty();
+  note(page.label);
+  await loadImages();
+  render();
+}
+function addSlide() {
+  const doc = page.doc;
+  if (doc === null) return;
+  page.slideIndex = doc.addSlide(page.slideIndex);
+  finishStructureChange();
+}
+function duplicateAt(index) {
+  const doc = page.doc;
+  if (doc === null || doc.slides()[index] === void 0) return;
+  page.slideIndex = doc.duplicateSlide(index);
+  finishStructureChange();
+  void loadImages();
+}
+function deleteAt(index) {
+  const doc = page.doc;
+  if (doc === null || doc.slides().length <= 1 || doc.slides()[index] === void 0) return;
+  doc.deleteSlide(index);
+  page.slideIndex = Math.min(index, doc.slides().length - 1);
+  finishStructureChange();
+}
+function finishStructureChange() {
+  page.selectedId = void 0;
+  page.editing = false;
+  page.editorShape = void 0;
+  page.thumbIndex = -1;
+  if (document.activeElement === editor) editor?.blur();
+  markDirty();
+  render();
+}
+function selectSlide(index) {
+  if (page.doc?.slides()[index] === void 0) return;
+  page.slideIndex = index;
+  page.selectedId = void 0;
+  page.editing = false;
+  page.editorShape = void 0;
+  if (document.activeElement === editor) editor?.blur();
+  render();
+}
+function openMenu(index, clientX, clientY) {
+  if (slideMenu === null || page.doc === null) return;
+  menuIndex = index;
+  if (deleteSlideButton !== null) deleteSlideButton.disabled = page.doc.slides().length <= 1;
+  slideMenu.hidden = false;
+  const width = slideMenu.offsetWidth;
+  const height = slideMenu.offsetHeight;
+  const left = Math.min(clientX, Math.max(8, window.innerWidth - width - 8));
+  const top = Math.min(clientY, Math.max(8, window.innerHeight - height - 8));
+  slideMenu.style.left = `${left}px`;
+  slideMenu.style.top = `${top}px`;
+}
+function hideMenu() {
+  if (slideMenu === null) return;
+  slideMenu.hidden = true;
+  menuIndex = -1;
+}
+function markDirty() {
+  page.dirty = true;
+  if (discardButton !== null) discardButton.disabled = false;
+}
+function clearDirty() {
+  page.dirty = false;
+  if (discardButton !== null) discardButton.disabled = true;
 }
 function note(message) {
   if (fileName !== null) fileName.textContent = message;
@@ -2068,7 +2707,30 @@ function syncEditor(shape) {
   page.editorShape = shape.id;
   editorFrame.hidden = false;
   placeEditor(shape);
-  if (document.activeElement !== editor || switched) editor.textContent = shape.plain;
+  if (document.activeElement !== editor || switched) paintEditor(shape);
+}
+function commitEditor() {
+  if (painting || editor === null) return;
+  const doc = page.doc;
+  const shape = selected();
+  if (doc === null || shape === void 0 || !shape.editable) return;
+  const grid = readEditorGrid(editor);
+  const offset = grid === void 0 ? caretOffset(editor) : 0;
+  try {
+    if (grid === void 0)
+      doc.setShapeText(page.slideIndex, shape.id, (editor.textContent ?? "").replace(/\r\n/g, "\n"));
+    else doc.setShapeRuns(page.slideIndex, shape.id, grid);
+  } catch (error) {
+    note(error instanceof Error ? error.message : "\u65E0\u6CD5\u4FEE\u6539\u6587\u5B57");
+    return;
+  }
+  markDirty();
+  render();
+  if (grid === void 0) {
+    const updated = selected();
+    if (updated !== void 0) paintEditor(updated);
+    restoreCaret(editor, offset);
+  }
 }
 function placeEditor(shape) {
   if (editorFrame === null || editor === null) return;
@@ -2085,16 +2747,109 @@ function placeEditor(shape) {
   editorFrame.style.padding = pad === void 0 ? "0" : `${pad.top / EMU_PER_PIXEL * scale}px ${pad.right / EMU_PER_PIXEL * scale}px ${pad.bottom / EMU_PER_PIXEL * scale}px ${pad.left / EMU_PER_PIXEL * scale}px`;
   const anchor = text?.anchor ?? "t";
   editorFrame.style.justifyContent = anchor === "ctr" ? "center" : anchor === "b" ? "flex-end" : "flex-start";
-  const fontPx = (run?.fontSize ?? 18) * 96 / 72;
-  editor.style.fontSize = `${fontPx * scale}px`;
-  editor.style.fontWeight = run?.bold === true ? "700" : "400";
-  editor.style.fontStyle = run?.italic === true ? "italic" : "";
-  editor.style.fontFamily = run === void 0 ? 'Calibri, "Microsoft YaHei", sans-serif' : editorFamily(run);
-  editor.style.color = run?.color ?? "#000000";
+  editor.style.fontSize = "";
+  editor.style.fontWeight = "";
+  editor.style.fontStyle = "";
+  editor.style.fontFamily = "";
+  editor.style.color = "";
+  editor.style.textDecoration = "";
   editor.style.textAlign = paragraph?.align === "ctr" ? "center" : paragraph?.align === "r" ? "right" : "left";
-  editor.style.textDecoration = run?.underline === true ? "underline" : "none";
-  const line = paragraph === void 0 ? fontPx * 1.2 : lineBox(run, paragraph);
+  const line = paragraph === void 0 ? (run?.fontSize ?? 18) * 96 / 72 * 1.2 : lineBox(run, paragraph);
   editor.style.lineHeight = `${line * scale}px`;
+}
+function paintEditor(shape) {
+  const grid = (shape.text?.paragraphs ?? []).map(
+    (paragraph) => paragraph.runs.map((run) => run.text)
+  );
+  paintGrid(shape, grid);
+}
+function paintGrid(shape, grid) {
+  if (editor === null) return;
+  const paragraphs2 = shape.text?.paragraphs ?? [];
+  const nodes = [];
+  painting = true;
+  paragraphs2.forEach((paragraph, paragraphIndex) => {
+    if (paragraphIndex > 0) nodes.push(document.createTextNode("\n"));
+    paragraph.runs.forEach((run, runIndex) => {
+      const span = document.createElement("span");
+      span.dataset.p = String(paragraphIndex);
+      span.dataset.r = String(runIndex);
+      styleRun(span, run);
+      span.textContent = grid[paragraphIndex]?.[runIndex] ?? run.text;
+      nodes.push(span);
+    });
+  });
+  editor.replaceChildren(...nodes);
+  painting = false;
+}
+function styleRun(span, run) {
+  const scale = page.scale;
+  span.style.fontSize = `${run.fontSize * 96 / 72 * scale}px`;
+  span.style.fontWeight = run.bold ? "700" : "400";
+  span.style.fontStyle = run.italic ? "italic" : "normal";
+  span.style.fontFamily = editorFamily(run);
+  span.style.color = run.color;
+  span.style.textDecoration = run.underline ? "underline" : "none";
+  span.style.whiteSpace = "pre-wrap";
+}
+function readEditorGrid(root) {
+  const grid = [];
+  for (const node of root.childNodes) {
+    if (node.nodeType === Node.TEXT_NODE) {
+      if (node.textContent !== "\n") return void 0;
+      continue;
+    }
+    if (!(node instanceof HTMLSpanElement)) return void 0;
+    const paragraphIndex = Number(node.dataset.p);
+    const runIndex = Number(node.dataset.r);
+    if (!Number.isInteger(paragraphIndex) || !Number.isInteger(runIndex)) return void 0;
+    const row = grid[paragraphIndex] ?? [];
+    if (row[runIndex] !== void 0) return void 0;
+    row[runIndex] = node.textContent ?? "";
+    grid[paragraphIndex] = row;
+  }
+  for (let index = 0; index < grid.length; index += 1) {
+    const row = grid[index];
+    if (row === void 0) return void 0;
+    for (let run = 0; run < row.length; run += 1) {
+      if (row[run] === void 0) return void 0;
+    }
+  }
+  return grid;
+}
+function caretOffset(root) {
+  const selection = document.getSelection();
+  if (selection === null || selection.rangeCount === 0 || !root.contains(selection.anchorNode))
+    return 0;
+  const range = selection.getRangeAt(0).cloneRange();
+  range.selectNodeContents(root);
+  range.setEnd(selection.getRangeAt(0).startContainer, selection.getRangeAt(0).startOffset);
+  return range.toString().length;
+}
+function restoreCaret(root, offset) {
+  const selection = document.getSelection();
+  if (selection === null) return;
+  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+  let remaining = offset;
+  let node = walker.nextNode();
+  while (node !== null) {
+    const length = node.textContent?.length ?? 0;
+    if (remaining <= length) {
+      const range2 = document.createRange();
+      range2.setStart(node, remaining);
+      range2.collapse(true);
+      selection.removeAllRanges();
+      selection.addRange(range2);
+      return;
+    }
+    remaining -= length;
+    node = walker.nextNode();
+  }
+  const range = document.createRange();
+  range.selectNodeContents(root);
+  range.collapse(false);
+  selection.removeAllRanges();
+  selection.addRange(range);
 }
 function editorFamily(run) {
   return [
@@ -2201,7 +2956,8 @@ function render() {
   if (canvas === null || context === null || context === void 0) return;
   const doc = page.doc;
   if (doc === null) {
-    thumbs?.replaceChildren();
+    for (const button of thumbButtons()) button.remove();
+    if (addButton !== null) addButton.disabled = true;
     syncEditor(void 0);
     return;
   }
@@ -2231,12 +2987,16 @@ function render() {
 function syncThumbs(doc) {
   if (thumbs === null) return;
   const slides = doc.slides();
-  while (thumbs.children.length > slides.length) thumbs.lastElementChild?.remove();
+  const buttons = thumbButtons();
+  while (buttons.length > slides.length) buttons.pop()?.remove();
   const slideChanged = page.thumbIndex !== page.slideIndex;
   slides.forEach((_, index) => {
-    const existing = thumbs.children.item(index);
-    const button = existing instanceof HTMLButtonElement ? existing : createThumb();
-    if (existing !== button) thumbs.append(button);
+    let button = buttons[index];
+    if (button === void 0) {
+      button = createThumb();
+      thumbs.append(button);
+      buttons.push(button);
+    }
     button.dataset.index = String(index);
     button.classList.toggle("current", index === page.slideIndex);
     if (index === page.slideIndex) button.setAttribute("aria-current", "true");
@@ -2249,6 +3009,10 @@ function syncThumbs(doc) {
   });
   page.thumbIndex = page.slideIndex;
 }
+function thumbButtons() {
+  if (thumbs === null) return [];
+  return [...thumbs.querySelectorAll("button.thumb")];
+}
 function createThumb() {
   const button = document.createElement("button");
   button.type = "button";
@@ -2259,15 +3023,80 @@ function createThumb() {
   button.addEventListener("pointerdown", (event) => {
     if (event.button !== 0) return;
     event.preventDefault();
-    const next = Number(button.dataset.index);
-    if (!Number.isInteger(next)) return;
-    page.slideIndex = next;
-    page.selectedId = void 0;
-    page.editing = false;
-    if (document.activeElement === editor) editor?.blur();
-    render();
+    const index = Number(button.dataset.index);
+    if (!Number.isInteger(index)) return;
+    drag = { index, pointerId: event.pointerId, startY: event.clientY, moved: false };
+    button.setPointerCapture(event.pointerId);
+  });
+  button.addEventListener("pointermove", (event) => {
+    if (drag === null || event.pointerId !== drag.pointerId) return;
+    if (!drag.moved && Math.abs(event.clientY - drag.startY) < 4) return;
+    drag.moved = true;
+    button.classList.add("dragging");
+    showDrop(dropSlot(event.clientY, drag.index));
+  });
+  button.addEventListener("pointerup", (event) => {
+    if (drag === null || event.pointerId !== drag.pointerId) return;
+    finishDrag(event.clientY);
+  });
+  button.addEventListener("pointercancel", (event) => {
+    if (drag === null || event.pointerId !== drag.pointerId) return;
+    drag = null;
+    clearDrop();
+  });
+  button.addEventListener("contextmenu", (event) => {
+    event.preventDefault();
+    const index = Number(button.dataset.index);
+    if (!Number.isInteger(index)) return;
+    selectSlide(index);
+    openMenu(index, event.clientX, event.clientY);
   });
   return button;
+}
+function finishDrag(clientY) {
+  const state = drag;
+  drag = null;
+  clearDrop();
+  if (state === null) return;
+  if (!state.moved) {
+    selectSlide(state.index);
+    return;
+  }
+  const to = dropSlot(clientY, state.index).to;
+  const doc = page.doc;
+  if (doc === null || to === state.index) {
+    selectSlide(state.index);
+    return;
+  }
+  doc.moveSlide(state.index, to);
+  page.slideIndex = to;
+  finishStructureChange();
+}
+function dropSlot(clientY, from) {
+  const buttons = thumbButtons();
+  let raw = buttons.length;
+  for (let index = 0; index < buttons.length; index += 1) {
+    const rect = buttons[index]?.getBoundingClientRect();
+    if (rect !== void 0 && clientY < rect.top + rect.height / 2) {
+      raw = index;
+      break;
+    }
+  }
+  return { raw, to: from < raw ? raw - 1 : raw };
+}
+function showDrop(slot) {
+  clearDrop();
+  const buttons = thumbButtons();
+  const from = drag?.index;
+  if (from === void 0 || slot.to === from) return;
+  if (slot.raw >= buttons.length) buttons[buttons.length - 1]?.classList.add("drop-after");
+  else buttons[slot.raw]?.classList.add("drop-before");
+}
+function clearDrop() {
+  if (thumbs === null) return;
+  for (const button of thumbButtons()) {
+    button.classList.remove("dragging", "drop-before", "drop-after");
+  }
 }
 function paintThumb(preview, scene) {
   const ctx = preview.getContext("2d");
@@ -2582,21 +3411,15 @@ function drawParagraph(ctx, paragraph, x, y, innerWidth) {
     if (paragraph.align === "ctr") offset = x + (innerWidth - line.width) / 2;
     if (paragraph.align === "r") offset = x + innerWidth - line.width;
     ctx.textBaseline = "alphabetic";
+    const baseline = sharedBaseline(ctx, paragraph, line, cursor, index);
     if (index === 0 && paragraph.bullet !== void 0 && paragraph.bulletRun !== void 0) {
       ctx.font = fontOf(paragraph.bulletRun, isCjk(paragraph.bullet));
       ctx.fillStyle = paragraph.bulletRun.color;
-      const size = paragraph.bulletRun.fontSize * 96 / 72;
-      const edge = fontEdges(ctx.measureText(paragraph.bullet), size);
-      ctx.fillText(
-        paragraph.bullet,
-        textX + paragraph.indent,
-        lineBaseline(cursor, line.height, edge.ascent, edge.descent)
-      );
+      ctx.fillText(paragraph.bullet, textX + paragraph.indent, baseline);
     }
     for (const token of line.tokens) {
       ctx.font = fontOf(token.run, token.cjk);
       ctx.fillStyle = token.run.color;
-      const baseline = lineBaseline(cursor, line.height, token.ascent, token.descent);
       ctx.fillText(token.text, offset, baseline);
       if (token.run.underline) {
         const size = token.run.fontSize * 96 / 72;
@@ -2612,6 +3435,23 @@ function drawParagraph(ctx, paragraph, x, y, innerWidth) {
     }
     cursor += line.height;
   });
+}
+function sharedBaseline(ctx, paragraph, line, cursor, index) {
+  let ascent = 0;
+  let descent = 0;
+  for (const token of line.tokens) {
+    ascent = Math.max(ascent, token.ascent);
+    descent = Math.max(descent, token.descent);
+  }
+  if (index === 0 && paragraph.bullet !== void 0 && paragraph.bulletRun !== void 0) {
+    ctx.font = fontOf(paragraph.bulletRun, isCjk(paragraph.bullet));
+    const size = paragraph.bulletRun.fontSize * 96 / 72;
+    const edge = fontEdges(ctx.measureText(paragraph.bullet), size);
+    ascent = Math.max(ascent, edge.ascent);
+    descent = Math.max(descent, edge.descent);
+  }
+  if (ascent === 0 && descent === 0) return cursor + line.height * 0.8;
+  return lineBaseline(cursor, line.height, ascent, descent);
 }
 function fontOf(run, cjk) {
   const family = cjk ? run.eastAsian : run.latin;
@@ -2639,18 +3479,6 @@ function setDash(ctx, dash) {
   if (dash === "dot") ctx.setLineDash([1.5, 3]);
   else if (dash === "dash") ctx.setLineDash([8, 4]);
   else ctx.setLineDash([]);
-}
-function download(bytes) {
-  const url = URL.createObjectURL(
-    new Blob([toBuffer(bytes)], {
-      type: "application/vnd.openxmlformats-officedocument.presentationml.presentation"
-    })
-  );
-  const link = document.createElement("a");
-  link.href = url;
-  link.download = "edited.pptx";
-  link.click();
-  URL.revokeObjectURL(url);
 }
 function toBuffer(bytes) {
   return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);

@@ -68,6 +68,81 @@ describe('pptx kernel', () => {
     expect(saved.slides()[1]?.shapes[0]?.text).toBe('第二页')
   })
 
+  it('keeps a later run when earlier text changes', async () => {
+    const opened = await openPptx(await sample())
+    opened.setShapeText(0, '2', 'Hello! & more')
+    const xml = new TextDecoder().decode(opened.part('ppt/slides/slide1.xml') ?? new Uint8Array())
+    expect(xml).toContain('<a:t>Hello!</a:t>')
+    expect(xml).toContain('> &amp; more</a:t>')
+    expect(opened.scene(0).shapes.find((shape) => shape.id === '2')?.plain).toBe('Hello! & more')
+    const runs = opened.scene(0).shapes.find((shape) => shape.id === '2')?.text?.paragraphs[0]?.runs
+    expect(runs?.map((run) => run.text)).toEqual(['Hello!', ' & more'])
+  })
+
+  it('adds a blank slide that reuses the current layout', async () => {
+    const opened = await openPptx(await themed())
+    expect(opened.addSlide(0)).toBe(1)
+    expect(opened.slides()).toHaveLength(2)
+    const rels = new TextDecoder().decode(
+      opened.part('ppt/slides/_rels/slide2.xml.rels') ?? new Uint8Array()
+    )
+    expect(rels).toContain('../slideLayouts/slideLayout1.xml')
+    expect(opened.scene(1).background).toEqual({ kind: 'solid', color: '#ff5500' })
+    expect(opened.scene(0).shapes.find((shape) => shape.id === '2')?.plain).toBe('季度汇报')
+  })
+
+  it('appends a new slide after every existing slide', async () => {
+    const opened = await openPptx(await sample())
+    expect(opened.addSlide(0)).toBe(2)
+    const slides = opened.slides()
+    expect(slides).toHaveLength(3)
+    expect(slides[1]?.shapes[0]?.text).toBe('第二页')
+    expect(slides[2]?.shapes).toEqual([])
+  })
+
+  it('duplicates a slide directly below the source', async () => {
+    const opened = await openPptx(await sample())
+    expect(opened.duplicateSlide(0)).toBe(1)
+    const slides = opened.slides()
+    expect(slides).toHaveLength(3)
+    expect(slides[1]?.shapes.find((shape) => shape.id === '2')?.text).toBe('Hello & more')
+    expect(slides[1]?.shapes.find((shape) => shape.id === '3')).toMatchObject({
+      kind: 'picture',
+      imagePath: 'ppt/media/image1.png'
+    })
+    expect(slides[2]?.shapes[0]?.text).toBe('第二页')
+    const saved = await openPptx(await opened.save())
+    expect(saved.part('ppt/media/image1.png')).toEqual(PNG)
+    expect(saved.slides()[1]?.shapes.find((shape) => shape.id === '3')?.kind).toBe('picture')
+  })
+
+  it('moves a slide to a new index', async () => {
+    const opened = await openPptx(await sample())
+    opened.moveSlide(1, 0)
+    expect(opened.slides().map((slide) => slide.shapes[0]?.text)).toEqual([
+      '第二页',
+      'Hello & more'
+    ])
+    const saved = await openPptx(await opened.save())
+    expect(saved.slides().map((slide) => slide.shapes[0]?.text)).toEqual(['第二页', 'Hello & more'])
+    saved.moveSlide(0, 0)
+    expect(saved.slides()[0]?.shapes[0]?.text).toBe('第二页')
+  })
+
+  it('deletes one slide and keeps the package openable', async () => {
+    const opened = await openPptx(await sample())
+    opened.deleteSlide(0)
+    expect(opened.slides().map((slide) => slide.shapes[0]?.text)).toEqual(['第二页'])
+    expect(opened.part('ppt/slides/slide1.xml')).toBeUndefined()
+    expect(opened.part('ppt/notes/note.xml')).toEqual(new TextEncoder().encode('<note>KEEP</note>'))
+    const saved = await openPptx(await opened.save())
+    expect(saved.slides()).toHaveLength(1)
+    expect(saved.slides()[0]?.partName).toBe('ppt/slides/slide2.xml')
+    const only = await openPptx(await themed())
+    expect(() => only.deleteSlide(0)).toThrow(/only slide/)
+    expect(() => opened.deleteSlide(3)).toThrow(/does not exist/)
+  })
+
   it('rejects a picture edit and a missing shape', async () => {
     const opened = await openPptx(await sample())
     expect(() => opened.setShapeText(0, '3', 'nope')).toThrow(/no text/)

@@ -15,6 +15,12 @@ import {
  * Line breaking is still a simple wrap, not Office layout.
  */
 
+interface SavedFile {
+  readonly name: string
+  getFile(): Promise<File>
+  createWritable(): Promise<{ write(data: Blob): Promise<void>; close(): Promise<void> }>
+}
+
 const page = {
   doc: null as PptxDocument | null,
   slideIndex: 0,
@@ -23,31 +29,81 @@ const page = {
   editing: false,
   editorShape: undefined as string | undefined,
   thumbIndex: -1,
-  images: new Map<string, ImageBitmap>()
+  images: new Map<string, ImageBitmap>(),
+  saved: null as Uint8Array | null,
+  dirty: false,
+  label: '',
+  servedName: null as string | null,
+  handle: null as SavedFile | null
 }
 
 let pressing = false
+let painting = false
+let plainOpen = readPlainOpen()
+let menuIndex = -1
+let drag: ThumbDrag | null = null
+
+interface ThumbDrag {
+  readonly index: number
+  readonly pointerId: number
+  readonly startY: number
+  moved: boolean
+}
 
 const openButton = document.querySelector<HTMLButtonElement>('#open')
 const fileInput = document.querySelector<HTMLInputElement>('#file')
 const fileName = document.querySelector<HTMLSpanElement>('#file-name')
 const saveButton = document.querySelector<HTMLButtonElement>('#save')
+const discardButton = document.querySelector<HTMLButtonElement>('#discard')
+const addButton = document.querySelector<HTMLButtonElement>('#add-slide')
 const thumbs = document.querySelector<HTMLElement>('#thumbs')
+const slideMenu = document.querySelector<HTMLDivElement>('#slide-menu')
+const copySlideButton = document.querySelector<HTMLButtonElement>('#copy-slide')
+const deleteSlideButton = document.querySelector<HTMLButtonElement>('#delete-slide')
 const sheet = document.querySelector<HTMLDivElement>('#sheet')
 const canvas = document.querySelector<HTMLCanvasElement>('#slide')
 const editorFrame = document.querySelector<HTMLDivElement>('#editor-frame')
 const editor = document.querySelector<HTMLDivElement>('#editor')
 const context = canvas?.getContext('2d')
 
-openButton?.addEventListener('click', () => fileInput?.click())
+openButton?.addEventListener('click', () => {
+  if (plainOpen || filePicker() === undefined || embeddedFrame()) choosePlainFile()
+  else void pickFile()
+})
 fileInput?.addEventListener('change', () => {
   const file = fileInput.files?.[0]
+  fileInput.value = ''
   if (file !== undefined) void openFile(file)
 })
 saveButton?.addEventListener('click', () => {
-  const doc = page.doc
-  if (doc === null) return
-  void doc.save().then((bytes) => download(bytes))
+  void saveCurrent()
+})
+discardButton?.addEventListener('click', () => {
+  void discardEdits()
+})
+addButton?.addEventListener('click', () => {
+  addSlide()
+})
+copySlideButton?.addEventListener('click', () => {
+  const index = menuIndex
+  hideMenu()
+  duplicateAt(index)
+})
+deleteSlideButton?.addEventListener('click', () => {
+  const index = menuIndex
+  hideMenu()
+  deleteAt(index)
+})
+document.addEventListener('pointerdown', (event) => {
+  if (slideMenu === null || slideMenu.hidden) return
+  if (event.target instanceof Node && slideMenu.contains(event.target)) return
+  hideMenu()
+})
+window.addEventListener('keydown', (event) => {
+  if (event.key === 'Escape') hideMenu()
+})
+thumbs?.addEventListener('scroll', () => {
+  hideMenu()
 })
 sheet?.addEventListener('pointerdown', (event) => {
   if (event.button !== 0 || canvas === null || !(event.target instanceof Node)) return
@@ -84,17 +140,16 @@ canvas?.addEventListener('mousemove', (event) => {
   const shape = hitTest(event.offsetX, event.offsetY)
   canvas.style.cursor = shape?.editable === true ? 'text' : 'default'
 })
-editor?.addEventListener('input', () => {
-  const doc = page.doc
-  const shape = selected()
-  if (doc === null || editor === null || shape === undefined || !shape.editable) return
-  try {
-    doc.setShapeText(page.slideIndex, shape.id, editor.textContent ?? '')
-  } catch (error) {
-    note(error instanceof Error ? error.message : '无法修改文字')
-    return
-  }
-  render()
+editor?.addEventListener('input', (event) => {
+  if (event.isComposing) return
+  commitEditor()
+})
+editor?.addEventListener('compositionend', () => {
+  commitEditor()
+})
+editor?.addEventListener('paste', (event) => {
+  event.preventDefault()
+  insertPlain(event.clipboardData?.getData('text/plain') ?? '')
 })
 editor?.addEventListener('beforeinput', (event) => {
   if (event.inputType !== 'insertParagraph' && event.inputType !== 'insertLineBreak') return
@@ -123,8 +178,7 @@ document.body.addEventListener('dragover', (event) => {
 })
 document.body.addEventListener('drop', (event) => {
   event.preventDefault()
-  const file = event.dataTransfer?.files[0]
-  if (file !== undefined) void openFile(file)
+  void openDropped(event)
 })
 
 const requested = new URLSearchParams(location.search).get('open')
@@ -134,32 +188,295 @@ async function openRequested(name: string): Promise<void> {
   try {
     const response = await fetch(encodeURIComponent(name))
     if (!response.ok) throw new Error('pptx: 找不到这个文件')
-    await openFile(new File([await response.arrayBuffer()], name))
+    page.handle = null
+    page.servedName = name
+    await openBytes(new Uint8Array(await response.arrayBuffer()), name)
   } catch (error) {
     note(error instanceof Error ? error.message : '无法打开这个文件')
   }
 }
 
-async function openFile(file: File): Promise<void> {
+function embeddedFrame(): boolean {
   try {
-    page.doc = await openPptx(new Uint8Array(await file.arrayBuffer()))
+    return window.self !== window.top
+  } catch {
+    return true
+  }
+}
+
+function filePicker():
+  | ((options: {
+      types?: Array<{ description?: string; accept: Record<string, string[]> }>
+    }) => Promise<SavedFile[]>)
+  | undefined {
+  return (
+    window as Window & {
+      showOpenFilePicker?: (options: {
+        types?: Array<{ description?: string; accept: Record<string, string[]> }>
+      }) => Promise<SavedFile[]>
+    }
+  ).showOpenFilePicker
+}
+
+function readPlainOpen(): boolean {
+  try {
+    return sessionStorage.getItem('pptx-plain-open') === '1'
+  } catch {
+    return false
+  }
+}
+
+function usePlainOpen(): void {
+  plainOpen = true
+  try {
+    sessionStorage.setItem('pptx-plain-open', '1')
+  } catch {
+    // Private mode can reject storage. This page load still keeps the plain picker.
+  }
+}
+
+function choosePlainFile(): void {
+  if (fileInput === null) return
+  fileInput.value = ''
+  fileInput.click()
+}
+
+function accessDenied(error: unknown): boolean {
+  if (
+    error instanceof DOMException &&
+    (error.name === 'NotAllowedError' || error.name === 'SecurityError')
+  ) {
+    return true
+  }
+  return error instanceof Error && error.message.includes('not allowed')
+}
+
+async function pickFile(): Promise<void> {
+  const picker = filePicker()
+  if (picker === undefined) {
+    usePlainOpen()
+    choosePlainFile()
+    return
+  }
+  try {
+    const [handle] = await picker({
+      types: [
+        {
+          description: 'PowerPoint',
+          accept: {
+            'application/vnd.openxmlformats-officedocument.presentationml.presentation': ['.pptx']
+          }
+        }
+      ]
+    })
+    if (handle === undefined) return
+    let file: File
+    try {
+      file = await handle.getFile()
+    } catch (error) {
+      if (!accessDenied(error)) throw error
+      // This browser can show the picker but then refuses to read the handle.
+      usePlainOpen()
+      page.handle = null
+      choosePlainFile()
+      return
+    }
+    page.handle = handle
+    page.servedName = null
+    await openBytes(new Uint8Array(await file.arrayBuffer()), handle.name)
+  } catch (error) {
+    if (error instanceof DOMException && error.name === 'AbortError') return
+    if (accessDenied(error)) {
+      usePlainOpen()
+      choosePlainFile()
+      return
+    }
+    note(error instanceof Error ? error.message : '无法打开这个文件')
+  }
+}
+
+async function openDropped(event: DragEvent): Promise<void> {
+  const item = event.dataTransfer?.items[0]
+  const readable = item as
+    | (DataTransferItem & { getAsFileSystemHandle?: () => Promise<SavedFile | null> })
+    | undefined
+  const handle = await readable?.getAsFileSystemHandle?.()
+  const file = item?.getAsFile() ?? event.dataTransfer?.files[0]
+  if (file === undefined) return
+  page.handle = handle ?? null
+  page.servedName = null
+  await openBytes(new Uint8Array(await file.arrayBuffer()), file.name)
+}
+
+async function openFile(file: File): Promise<void> {
+  page.handle = null
+  page.servedName = null
+  await openBytes(new Uint8Array(await file.arrayBuffer()), file.name)
+}
+
+async function openBytes(bytes: Uint8Array, label: string): Promise<void> {
+  const saved = bytes.slice()
+  try {
+    page.doc = await openPptx(saved)
   } catch (error) {
     page.doc = null
+    page.saved = null
+    clearDirty()
     if (saveButton !== null) saveButton.disabled = true
+    if (addButton !== null) addButton.disabled = true
     note(error instanceof Error ? error.message : '无法打开这个文件')
     render()
     return
   }
+  page.saved = saved
+  page.label = label
   page.slideIndex = 0
   page.selectedId = undefined
   page.editing = false
   page.editorShape = undefined
   page.thumbIndex = -1
   page.images.clear()
+  clearDirty()
   if (saveButton !== null) saveButton.disabled = false
-  note(file.name)
+  if (addButton !== null) addButton.disabled = false
+  note(label)
   await loadImages()
   render()
+}
+
+async function saveCurrent(): Promise<void> {
+  const doc = page.doc
+  if (doc === null || saveButton === null || saveButton.disabled) return
+  saveButton.disabled = true
+  try {
+    const bytes = await doc.save()
+    await writeCurrent(bytes)
+    page.saved = bytes.slice()
+    const index = page.slideIndex
+    const selectedId = page.selectedId
+    page.doc = await openPptx(bytes.slice())
+    page.slideIndex = Math.min(index, Math.max(page.doc.slides().length - 1, 0))
+    page.selectedId = selectedId
+    page.editing = false
+    page.editorShape = undefined
+    clearDirty()
+    note(page.label.length > 0 ? page.label : '已保存')
+    await loadImages()
+    render()
+  } catch (error) {
+    note(error instanceof Error ? error.message : '无法保存')
+  } finally {
+    if (page.doc !== null) saveButton.disabled = false
+  }
+}
+
+async function writeCurrent(bytes: Uint8Array): Promise<void> {
+  const body = new Blob([toBuffer(bytes)], {
+    type: 'application/vnd.openxmlformats-officedocument.presentationml.presentation'
+  })
+  if (page.handle !== null) {
+    const writable = await page.handle.createWritable()
+    await writable.write(body)
+    await writable.close()
+    return
+  }
+  if (page.servedName !== null) {
+    const response = await fetch(`/save?name=${encodeURIComponent(page.servedName)}`, {
+      method: 'POST',
+      body
+    })
+    if (!response.ok) throw new Error('无法覆盖当前文件')
+    return
+  }
+  throw new Error('请用「打开」选择文件后再保存')
+}
+
+async function discardEdits(): Promise<void> {
+  if (page.saved === null || !page.dirty) return
+  const index = page.slideIndex
+  page.doc = await openPptx(page.saved.slice())
+  page.slideIndex = Math.min(index, Math.max(page.doc.slides().length - 1, 0))
+  page.selectedId = undefined
+  page.editing = false
+  page.editorShape = undefined
+  page.thumbIndex = -1
+  page.images.clear()
+  clearDirty()
+  note(page.label)
+  await loadImages()
+  render()
+}
+
+function addSlide(): void {
+  const doc = page.doc
+  if (doc === null) return
+  page.slideIndex = doc.addSlide(page.slideIndex)
+  finishStructureChange()
+}
+
+function duplicateAt(index: number): void {
+  const doc = page.doc
+  if (doc === null || doc.slides()[index] === undefined) return
+  page.slideIndex = doc.duplicateSlide(index)
+  finishStructureChange()
+  void loadImages()
+}
+
+function deleteAt(index: number): void {
+  const doc = page.doc
+  if (doc === null || doc.slides().length <= 1 || doc.slides()[index] === undefined) return
+  doc.deleteSlide(index)
+  page.slideIndex = Math.min(index, doc.slides().length - 1)
+  finishStructureChange()
+}
+
+function finishStructureChange(): void {
+  page.selectedId = undefined
+  page.editing = false
+  page.editorShape = undefined
+  page.thumbIndex = -1
+  if (document.activeElement === editor) editor?.blur()
+  markDirty()
+  render()
+}
+
+function selectSlide(index: number): void {
+  if (page.doc?.slides()[index] === undefined) return
+  page.slideIndex = index
+  page.selectedId = undefined
+  page.editing = false
+  page.editorShape = undefined
+  if (document.activeElement === editor) editor?.blur()
+  render()
+}
+
+function openMenu(index: number, clientX: number, clientY: number): void {
+  if (slideMenu === null || page.doc === null) return
+  menuIndex = index
+  if (deleteSlideButton !== null) deleteSlideButton.disabled = page.doc.slides().length <= 1
+  slideMenu.hidden = false
+  const width = slideMenu.offsetWidth
+  const height = slideMenu.offsetHeight
+  const left = Math.min(clientX, Math.max(8, window.innerWidth - width - 8))
+  const top = Math.min(clientY, Math.max(8, window.innerHeight - height - 8))
+  slideMenu.style.left = `${left}px`
+  slideMenu.style.top = `${top}px`
+}
+
+function hideMenu(): void {
+  if (slideMenu === null) return
+  slideMenu.hidden = true
+  menuIndex = -1
+}
+
+function markDirty(): void {
+  page.dirty = true
+  if (discardButton !== null) discardButton.disabled = false
+}
+
+function clearDirty(): void {
+  page.dirty = false
+  if (discardButton !== null) discardButton.disabled = true
 }
 
 function note(message: string): void {
@@ -185,7 +502,31 @@ function syncEditor(shape: PaintShape | undefined): void {
   page.editorShape = shape.id
   editorFrame.hidden = false
   placeEditor(shape)
-  if (document.activeElement !== editor || switched) editor.textContent = shape.plain
+  if (document.activeElement !== editor || switched) paintEditor(shape)
+}
+
+function commitEditor(): void {
+  if (painting || editor === null) return
+  const doc = page.doc
+  const shape = selected()
+  if (doc === null || shape === undefined || !shape.editable) return
+  const grid = readEditorGrid(editor)
+  const offset = grid === undefined ? caretOffset(editor) : 0
+  try {
+    if (grid === undefined)
+      doc.setShapeText(page.slideIndex, shape.id, (editor.textContent ?? '').replace(/\r\n/g, '\n'))
+    else doc.setShapeRuns(page.slideIndex, shape.id, grid)
+  } catch (error) {
+    note(error instanceof Error ? error.message : '无法修改文字')
+    return
+  }
+  markDirty()
+  render()
+  if (grid === undefined) {
+    const updated = selected()
+    if (updated !== undefined) paintEditor(updated)
+    restoreCaret(editor, offset)
+  }
 }
 
 function placeEditor(shape: PaintShape): void {
@@ -207,18 +548,117 @@ function placeEditor(shape: PaintShape): void {
   const anchor = text?.anchor ?? 't'
   editorFrame.style.justifyContent =
     anchor === 'ctr' ? 'center' : anchor === 'b' ? 'flex-end' : 'flex-start'
-  const fontPx = ((run?.fontSize ?? 18) * 96) / 72
-  editor.style.fontSize = `${fontPx * scale}px`
-  editor.style.fontWeight = run?.bold === true ? '700' : '400'
-  editor.style.fontStyle = run?.italic === true ? 'italic' : ''
-  editor.style.fontFamily =
-    run === undefined ? 'Calibri, "Microsoft YaHei", sans-serif' : editorFamily(run)
-  editor.style.color = run?.color ?? '#000000'
+  editor.style.fontSize = ''
+  editor.style.fontWeight = ''
+  editor.style.fontStyle = ''
+  editor.style.fontFamily = ''
+  editor.style.color = ''
+  editor.style.textDecoration = ''
   editor.style.textAlign =
     paragraph?.align === 'ctr' ? 'center' : paragraph?.align === 'r' ? 'right' : 'left'
-  editor.style.textDecoration = run?.underline === true ? 'underline' : 'none'
-  const line = paragraph === undefined ? fontPx * 1.2 : lineBox(run, paragraph)
+  const line =
+    paragraph === undefined ? (((run?.fontSize ?? 18) * 96) / 72) * 1.2 : lineBox(run, paragraph)
   editor.style.lineHeight = `${line * scale}px`
+}
+
+function paintEditor(shape: PaintShape): void {
+  const grid = (shape.text?.paragraphs ?? []).map((paragraph) =>
+    paragraph.runs.map((run) => run.text)
+  )
+  paintGrid(shape, grid)
+}
+
+function paintGrid(shape: PaintShape, grid: readonly (readonly string[])[]): void {
+  if (editor === null) return
+  const paragraphs = shape.text?.paragraphs ?? []
+  const nodes: Node[] = []
+  painting = true
+  paragraphs.forEach((paragraph, paragraphIndex) => {
+    if (paragraphIndex > 0) nodes.push(document.createTextNode('\n'))
+    paragraph.runs.forEach((run, runIndex) => {
+      const span = document.createElement('span')
+      span.dataset.p = String(paragraphIndex)
+      span.dataset.r = String(runIndex)
+      styleRun(span, run)
+      span.textContent = grid[paragraphIndex]?.[runIndex] ?? run.text
+      nodes.push(span)
+    })
+  })
+  editor.replaceChildren(...nodes)
+  painting = false
+}
+
+function styleRun(span: HTMLSpanElement, run: PaintRun): void {
+  const scale = page.scale
+  span.style.fontSize = `${((run.fontSize * 96) / 72) * scale}px`
+  span.style.fontWeight = run.bold ? '700' : '400'
+  span.style.fontStyle = run.italic ? 'italic' : 'normal'
+  span.style.fontFamily = editorFamily(run)
+  span.style.color = run.color
+  span.style.textDecoration = run.underline ? 'underline' : 'none'
+  span.style.whiteSpace = 'pre-wrap'
+}
+
+function readEditorGrid(root: HTMLElement): string[][] | undefined {
+  const grid: string[][] = []
+  for (const node of root.childNodes) {
+    if (node.nodeType === Node.TEXT_NODE) {
+      if (node.textContent !== '\n') return undefined
+      continue
+    }
+    if (!(node instanceof HTMLSpanElement)) return undefined
+    const paragraphIndex = Number(node.dataset.p)
+    const runIndex = Number(node.dataset.r)
+    if (!Number.isInteger(paragraphIndex) || !Number.isInteger(runIndex)) return undefined
+    const row = grid[paragraphIndex] ?? []
+    if (row[runIndex] !== undefined) return undefined
+    row[runIndex] = node.textContent ?? ''
+    grid[paragraphIndex] = row
+  }
+  for (let index = 0; index < grid.length; index += 1) {
+    const row = grid[index]
+    if (row === undefined) return undefined
+    for (let run = 0; run < row.length; run += 1) {
+      if (row[run] === undefined) return undefined
+    }
+  }
+  return grid
+}
+
+function caretOffset(root: HTMLElement): number {
+  const selection = document.getSelection()
+  if (selection === null || selection.rangeCount === 0 || !root.contains(selection.anchorNode))
+    return 0
+  const range = selection.getRangeAt(0).cloneRange()
+  range.selectNodeContents(root)
+  range.setEnd(selection.getRangeAt(0).startContainer, selection.getRangeAt(0).startOffset)
+  return range.toString().length
+}
+
+function restoreCaret(root: HTMLElement, offset: number): void {
+  const selection = document.getSelection()
+  if (selection === null) return
+  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT)
+  let remaining = offset
+  let node = walker.nextNode()
+  while (node !== null) {
+    const length = node.textContent?.length ?? 0
+    if (remaining <= length) {
+      const range = document.createRange()
+      range.setStart(node, remaining)
+      range.collapse(true)
+      selection.removeAllRanges()
+      selection.addRange(range)
+      return
+    }
+    remaining -= length
+    node = walker.nextNode()
+  }
+  const range = document.createRange()
+  range.selectNodeContents(root)
+  range.collapse(false)
+  selection.removeAllRanges()
+  selection.addRange(range)
 }
 
 function editorFamily(run: PaintRun): string {
@@ -337,7 +777,8 @@ function render(): void {
   if (canvas === null || context === null || context === undefined) return
   const doc = page.doc
   if (doc === null) {
-    thumbs?.replaceChildren()
+    for (const button of thumbButtons()) button.remove()
+    if (addButton !== null) addButton.disabled = true
     syncEditor(undefined)
     return
   }
@@ -368,12 +809,16 @@ function render(): void {
 function syncThumbs(doc: PptxDocument): void {
   if (thumbs === null) return
   const slides = doc.slides()
-  while (thumbs.children.length > slides.length) thumbs.lastElementChild?.remove()
+  const buttons = thumbButtons()
+  while (buttons.length > slides.length) buttons.pop()?.remove()
   const slideChanged = page.thumbIndex !== page.slideIndex
   slides.forEach((_, index) => {
-    const existing = thumbs.children.item(index)
-    const button = existing instanceof HTMLButtonElement ? existing : createThumb()
-    if (existing !== button) thumbs.append(button)
+    let button = buttons[index]
+    if (button === undefined) {
+      button = createThumb()
+      thumbs.append(button)
+      buttons.push(button)
+    }
     button.dataset.index = String(index)
     button.classList.toggle('current', index === page.slideIndex)
     if (index === page.slideIndex) button.setAttribute('aria-current', 'true')
@@ -387,6 +832,11 @@ function syncThumbs(doc: PptxDocument): void {
   page.thumbIndex = page.slideIndex
 }
 
+function thumbButtons(): HTMLButtonElement[] {
+  if (thumbs === null) return []
+  return [...thumbs.querySelectorAll<HTMLButtonElement>('button.thumb')]
+}
+
 function createThumb(): HTMLButtonElement {
   const button = document.createElement('button')
   button.type = 'button'
@@ -397,15 +847,84 @@ function createThumb(): HTMLButtonElement {
   button.addEventListener('pointerdown', (event: PointerEvent) => {
     if (event.button !== 0) return
     event.preventDefault()
-    const next = Number(button.dataset.index)
-    if (!Number.isInteger(next)) return
-    page.slideIndex = next
-    page.selectedId = undefined
-    page.editing = false
-    if (document.activeElement === editor) editor?.blur()
-    render()
+    const index = Number(button.dataset.index)
+    if (!Number.isInteger(index)) return
+    drag = { index, pointerId: event.pointerId, startY: event.clientY, moved: false }
+    button.setPointerCapture(event.pointerId)
+  })
+  button.addEventListener('pointermove', (event: PointerEvent) => {
+    if (drag === null || event.pointerId !== drag.pointerId) return
+    if (!drag.moved && Math.abs(event.clientY - drag.startY) < 4) return
+    drag.moved = true
+    button.classList.add('dragging')
+    showDrop(dropSlot(event.clientY, drag.index))
+  })
+  button.addEventListener('pointerup', (event: PointerEvent) => {
+    if (drag === null || event.pointerId !== drag.pointerId) return
+    finishDrag(event.clientY)
+  })
+  button.addEventListener('pointercancel', (event: PointerEvent) => {
+    if (drag === null || event.pointerId !== drag.pointerId) return
+    drag = null
+    clearDrop()
+  })
+  button.addEventListener('contextmenu', (event: MouseEvent) => {
+    event.preventDefault()
+    const index = Number(button.dataset.index)
+    if (!Number.isInteger(index)) return
+    selectSlide(index)
+    openMenu(index, event.clientX, event.clientY)
   })
   return button
+}
+
+function finishDrag(clientY: number): void {
+  const state = drag
+  drag = null
+  clearDrop()
+  if (state === null) return
+  if (!state.moved) {
+    selectSlide(state.index)
+    return
+  }
+  const to = dropSlot(clientY, state.index).to
+  const doc = page.doc
+  if (doc === null || to === state.index) {
+    selectSlide(state.index)
+    return
+  }
+  doc.moveSlide(state.index, to)
+  page.slideIndex = to
+  finishStructureChange()
+}
+
+function dropSlot(clientY: number, from: number): { raw: number; to: number } {
+  const buttons = thumbButtons()
+  let raw = buttons.length
+  for (let index = 0; index < buttons.length; index += 1) {
+    const rect = buttons[index]?.getBoundingClientRect()
+    if (rect !== undefined && clientY < rect.top + rect.height / 2) {
+      raw = index
+      break
+    }
+  }
+  return { raw, to: from < raw ? raw - 1 : raw }
+}
+
+function showDrop(slot: { raw: number; to: number }): void {
+  clearDrop()
+  const buttons = thumbButtons()
+  const from = drag?.index
+  if (from === undefined || slot.to === from) return
+  if (slot.raw >= buttons.length) buttons[buttons.length - 1]?.classList.add('drop-after')
+  else buttons[slot.raw]?.classList.add('drop-before')
+}
+
+function clearDrop(): void {
+  if (thumbs === null) return
+  for (const button of thumbButtons()) {
+    button.classList.remove('dragging', 'drop-before', 'drop-after')
+  }
 }
 
 function paintThumb(preview: HTMLCanvasElement, scene: SlideScene): void {
@@ -840,21 +1359,15 @@ function drawParagraph(
     if (paragraph.align === 'ctr') offset = x + (innerWidth - line.width) / 2
     if (paragraph.align === 'r') offset = x + innerWidth - line.width
     ctx.textBaseline = 'alphabetic'
+    const baseline = sharedBaseline(ctx, paragraph, line, cursor, index)
     if (index === 0 && paragraph.bullet !== undefined && paragraph.bulletRun !== undefined) {
       ctx.font = fontOf(paragraph.bulletRun, isCjk(paragraph.bullet))
       ctx.fillStyle = paragraph.bulletRun.color
-      const size = (paragraph.bulletRun.fontSize * 96) / 72
-      const edge = fontEdges(ctx.measureText(paragraph.bullet), size)
-      ctx.fillText(
-        paragraph.bullet,
-        textX + paragraph.indent,
-        lineBaseline(cursor, line.height, edge.ascent, edge.descent)
-      )
+      ctx.fillText(paragraph.bullet, textX + paragraph.indent, baseline)
     }
     for (const token of line.tokens) {
       ctx.font = fontOf(token.run, token.cjk)
       ctx.fillStyle = token.run.color
-      const baseline = lineBaseline(cursor, line.height, token.ascent, token.descent)
       ctx.fillText(token.text, offset, baseline)
       if (token.run.underline) {
         const size = (token.run.fontSize * 96) / 72
@@ -870,6 +1383,30 @@ function drawParagraph(
     }
     cursor += line.height
   })
+}
+
+function sharedBaseline(
+  ctx: CanvasRenderingContext2D,
+  paragraph: LaidParagraph,
+  line: LaidLine,
+  cursor: number,
+  index: number
+): number {
+  let ascent = 0
+  let descent = 0
+  for (const token of line.tokens) {
+    ascent = Math.max(ascent, token.ascent)
+    descent = Math.max(descent, token.descent)
+  }
+  if (index === 0 && paragraph.bullet !== undefined && paragraph.bulletRun !== undefined) {
+    ctx.font = fontOf(paragraph.bulletRun, isCjk(paragraph.bullet))
+    const size = (paragraph.bulletRun.fontSize * 96) / 72
+    const edge = fontEdges(ctx.measureText(paragraph.bullet), size)
+    ascent = Math.max(ascent, edge.ascent)
+    descent = Math.max(descent, edge.descent)
+  }
+  if (ascent === 0 && descent === 0) return cursor + line.height * 0.8
+  return lineBaseline(cursor, line.height, ascent, descent)
 }
 
 function fontOf(run: PaintRun, cjk: boolean): string {
@@ -910,19 +1447,6 @@ function setDash(ctx: CanvasRenderingContext2D, dash: 'solid' | 'dash' | 'dot'):
   if (dash === 'dot') ctx.setLineDash([1.5, 3])
   else if (dash === 'dash') ctx.setLineDash([8, 4])
   else ctx.setLineDash([])
-}
-
-function download(bytes: Uint8Array): void {
-  const url = URL.createObjectURL(
-    new Blob([toBuffer(bytes)], {
-      type: 'application/vnd.openxmlformats-officedocument.presentationml.presentation'
-    })
-  )
-  const link = document.createElement('a')
-  link.href = url
-  link.download = 'edited.pptx'
-  link.click()
-  URL.revokeObjectURL(url)
 }
 
 function toBuffer(bytes: Uint8Array): ArrayBuffer {
