@@ -1,6 +1,4 @@
-# Generated build artifacts — never commit these.
-# lib/, the Viewer, the worker, and the Gateway are built from src/ over the SDK:
-#   pnpm run build
+# Generated output. The preview bundle packages/pptx-kernel/web/editor.js is tracked.
 dist/
 /lib/
 node_modules/

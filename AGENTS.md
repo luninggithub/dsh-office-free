@@ -1,121 +1,48 @@
 # AGENTS.md
 
-This file defines repository-specific instructions for `dsh-univer-office`, an installable Univer bundle for DeepSeek Harness (DSH). Follow inherited instructions as well.
+This file defines repository-specific instructions for the from-scratch PPTX kernel in `packages/pptx-kernel`. Describe only the current implementation.
 
-## 1. Sources of truth
-
-- Read [`docs/architecture.md`](docs/architecture.md) before changing architecture, ownership, trust boundaries, cross-process protocols, tool flows, or deployment behavior.
-- Keep standing development rules and commands in this file.
-- Keep user-visible capabilities, configuration, and limitations synchronized in both [`README.md`](README.md) and [`README.zh-CN.md`](README.zh-CN.md).
-- Keep model workflows in `skills/`. Do not duplicate tool schemas or step-by-step agent workflows elsewhere.
-- Describe only the current implementation. Do not preserve prototype behavior unless it remains a documented product contract.
-
-## 2. Commands and validation
+## 1. Commands and validation
 
 Use Node.js `>=22.19.0` and `pnpm@11.23.0`.
 
 ```sh
 pnpm install
 pnpm run lint
-pnpm run lint:fix
 pnpm run typecheck
-pnpm run format:check
-pnpm run format
-pnpm run update:univer-sdk --sdk_version <exact-version>
+pnpm run test:unit
+pnpm run pptx:web
+node packages/pptx-kernel/web/server.mjs
 ```
 
-- Treat `oxlint.config.ts` as project policy. Fix lint errors instead of weakening rules; change rule severity only when the task explicitly targets lint policy.
-- `lint:fix` and `format` mutate files. Run them only when their full write scope is intended and reviewed.
-- `format` and `format:check` are repository-wide. Do not create unrelated formatting churn. For a narrow change, check supported files directly with `pnpm exec oxfmt --check <files>`.
-- `pnpm run build` builds Host/Client, Worker, Gateway, Render Machine, and Viewer. Use `build:lib`, `build:worker`, `build:gateway`, `build:render`, or `build:viewer` for a narrower build.
-- `pnpm run update:univer-sdk` re-pins the Univer SDK cohort to one exact version in every manifest, leaves self-versioned packages untouched, strips any transitive binding declarations (the wrappers own those versions), and drops SDK entries from `pnpm-workspace.yaml` overrides; run `pnpm install` and the full build afterwards.
-- Before any cohort version change, read the Collaboration SDK migration notes for the target version; they live in a private repository that the configured GitHub credentials already reach, so ask for the location instead of recording a link here. Those notes are authoritative for the component schema versions the Gateway adapters own, so a version bump is only complete once `packages/univerfile-sqlite/src/schema/v3.ts` and the readers in `packages/univerfile-sqlite/src/upgrade/` match them.
-- Tests run on Vitest in three projects: `unit`, `integration`, and `e2e` (see §7). `integration` and most `e2e` files consume `lib/` and `artifacts/`; always build the affected target from the current source before running them. `pnpm test` builds everything, then runs every project.
+- Treat `oxlint.config.ts` as project policy. Fix lint errors instead of weakening rules.
+- `lint:fix` and `format` mutate files. Run them only when their full write scope is intended.
+- `format` and `format:check` are repository-wide. For a narrow change, check the touched files with `pnpm exec oxfmt --check <files>`.
+- `pnpm run pptx:web` rebuilds `packages/pptx-kernel/web/editor.js`. Do not hand-edit that bundle. Bump the `editor.js` query in `index.html` when the page must load the new bundle.
+- The preview server serves `packages/pptx-kernel/web` on `127.0.0.1:4173` and accepts `POST /save?name=` only for an existing `.pptx` in that directory.
+- Run `pnpm run typecheck` for TypeScript changes and `git diff --check` before every handoff. Report the exact commands that completed successfully.
 
-Choose the narrowest validation that proves the change. Run one file with `pnpm exec vitest run <path>`:
+## 2. Kernel boundaries
 
-| Change                                                                                        | Build first                      | Test                                                                     |
-| --------------------------------------------------------------------------------------------- | -------------------------------- | ------------------------------------------------------------------------ |
-| Pure Host, Client, or shared logic                                                            | None                             | `pnpm run test:unit`                                                     |
-| Host, HTTP, or tools                                                                          | `pnpm run build:lib`             | `test/integration/host.test.ts`                                          |
-| DSH Client                                                                                    | `pnpm run build:lib`             | `test/integration/client/`                                               |
-| Review-panel or floating-window layout                                                        | None                             | `test/e2e/client-layout.test.ts`                                         |
-| Bundled skills                                                                                | `pnpm run build:lib`             | `test/integration/skills.test.ts`                                        |
-| Product telemetry or lifecycle packaging                                                      | `pnpm run build:lib`             | `test/integration/telemetry.test.ts`                                     |
-| Viewer UI                                                                                     | `pnpm run build:viewer`          | `test/unit/` for Viewer logic; `test/e2e/viewer.test.ts` for built pages |
-| `.univer` schema, stores, or upgrade                                                          | None                             | `pnpm run test:univerfile`; `test/unit/gateway-univerfile.test.ts`       |
-| Import or export fidelity                                                                     | Build every affected application | `test/integration/exchange.test.ts`                                      |
-| Gateway, Worker, persistence, worktree lifecycle, Render Machine, or a cross-process protocol | Build every affected application | `pnpm run test:integration`                                              |
-| Cross-layer, SDK upgrade, or release change                                                   | None separately                  | `pnpm test`                                                              |
+- `@dsh/pptx-kernel` has no Univer or paid Office SDK dependency. Do not add one.
+- The package is isomorphic: browser and Node 22. `src/` must not import Node-only modules. ZIP uses `DecompressionStream` / `CompressionStream`.
+- Web UI code lives in `packages/pptx-kernel/web/`. It imports the kernel through `../src/index.ts`.
+- Content writes stay inside the open PPTX package. Untouched ZIP parts are copied through on save.
+- `save()` overwrites the open file. The page does not download a new file.
+- A new slide is blank, appended at the end, and reuses the current slide's layout.
+- Thumbnail order, copy, and delete rewrite the slide list in the package. The last remaining slide cannot be deleted.
+- Text edits keep existing run formatting. Do not put a whole shape's text into the first run.
+- Picture and text-box moves, picture resize and crop, and shape deletion rewrite that shape in the open package.
+- The preview zoom is an explicit scale from 10% to 400%, default 100%. The wheel changes that scale only while the slide page itself is selected; otherwise it scrolls the viewport.
 
-For DSH compatibility changes, build `lib/` first, then point `UNIVER_DSH_RUNTIME_ROOT` at an independently installed target DSH package: `test/integration/client/` then checks that release's Cordis lifecycle, and `test/integration/host-profile.test.ts` (skipped without the variable) checks that the published manifest and bundle patch pass DSH's compatibility gate and activate the Provider in a temporary deployment.
-
-Run `pnpm run typecheck` for TypeScript changes and `git diff --check` before every handoff. Report the exact commands that completed successfully.
-
-`pnpm run typecheck` does not cover `src/gateway-app/**`: the root `tsconfig.json` excludes it and `tsconfig.viewer.json` includes only its `contract/`. Gateway type errors therefore surface in the integration tests rather than in the typecheck, so treat `pnpm run build:gateway` plus `pnpm run test:integration` as the Gateway type gate. A relative import that omits its file extension (`from './collab-service'`) resolves at runtime but makes every type it re-exports `any`, which silently disables checking at the call sites; always write the explicit `.ts`/`.js` path this repository otherwise requires.
-
-## 3. Architecture and Cordis boundaries
-
-- A complete capability seam consists of a Service Definition, Provider, and Consumer. `UniverService` is the stable Host boundary; HTTP and tools remain Consumers, while concrete Gateway, Worker, cache, and worktree behavior remains in the Provider.
-- WebServer and tools call only `ctx.univer`. They must not access Gateway adapters, workers, subprocesses, or the filesystem directly.
-- Function plugins export the applicable named members among `name`, `inject`, `Config`, and `apply`; do not add a default export. Declare dependencies through `inject`, not mounting order.
-- Mount the root plugin by bare package name in `cordis.patch.yml`. A relative or internal entry prevents DSH from discovering the browser bundle declared by `package.json#dsh.client`.
-- Every registration belongs to the current Cordis fiber and must be reversible. Use `ctx.effect()`, `ctx.on()`, or a registry API that returns an exact disposer. Unload must leave no routes, tools, skill providers, listeners, timers, or subprocesses behind.
-- Validate deployable configuration before use. Resolve behavioral defaults explicitly in the Provider that owns them; do not hide deployment defaults deep inside execution code.
-- Model-visible facts must come from replayable structured session events. `univer_*` tools return the file, worktree, and Unit identities required to recover a target; Client code must not parse free text or shell output.
-- Tool presentation depends only on arguments and persisted results. Before adding a tool, define execution, cancellation, timeout, structured output, presentation, approval, and skill guidance, then validate the real Consumer path.
-- Two packages also have copies in other Univer repositories. Every repository holds a complete copy, so each still builds and publishes on its own; to keep the copies from drifting, change every copy together:
-  - `packages/univerfile-sqlite` also lives in `dream-num/univer-cli`. Keep `src/` and `test/` byte-identical in the two copies.
-  - `packages/unit-comparison-viewer` also lives in `dream-num/univer-cli` and `dream-num/univer-workspace`. Keep behaviour identical across the copies; each may adapt to its host, as this one does for the React 18 Host.
-
-## 4. Runtime boundaries
-
-- Client components do not call `fetch` directly. Keep HTTP in `src/client/api/` and polling or mutations in hooks.
-- The Client projects replayable session events and authoritative Host state; it does not own worktree truth, read local files, or manage Gateway processes.
-- `src/shared/wire/` contains JSON-serializable data only and must not depend on Node.js, React, Cordis, or Univer.
-- Validate every process, HTTP, and wire boundary at runtime. Do not duplicate hostile-input validation for values that remain in one TypeScript process.
-- Use existing branded types for file, worktree, and Unit identities across boundaries.
-- Host creates Viewer URLs only after authorizing the resource. Client treats file, worktree, Unit, mode, and scope parameters as opaque and may append only presentation-only values such as language.
-- Gateway, Worker, Viewer, and Render Machine are independent applications. Communicate through explicit protocols; do not import process-owned state across applications or depend on a global `univer` CLI or external source checkout.
-
-## 5. Security and lifecycle invariants
-
-- Content writes require an explicit `draft` worktree. `ready` and `reopen` are normal agent operations. `merge` and `discard` require an explicit user request plus DSH approval and must never be automatic cleanup.
-- `merged` and `discarded` are terminal. Preserve their historical review projection, but remove live windows and mutation controls.
-- Bind `/univer-api` browser queries and mutations, Viewer document opens, caches, polling, window deduplication, and review state to the DSH session and workspace scope. Viewer `/uf` requests and WebSocket tunnels rely on DSH connection authentication without a plugin scope cookie; authenticated browsers may address any `.univer` file accessible to the Host process.
-- Authorize Provider file operations, imports, exports, screenshot output, and SVG resources against the explicit tool/session workspace, then verify them again with `realpath` at the Provider boundary. Gateway process reuse does not broaden Provider access; the authenticated Viewer `/uf` surface follows the separate browser contract above.
-- Concurrent Gateway starts share one startup operation. Failure, early exit, and unload must clear ownership and allow retry. Stop only subprocesses started by this plugin, skip occupied ports, and verify the health endpoint identity.
-- Cancellation and teardown must reach quiescence: reject new notifications, abort or kill owned work, and await Worker, browser, and subprocess exit. One clear owner manages settlement and cleanup for each asynchronous operation.
-- `univer_screenshot` may return model-visible PNG attachments only when the current model supports image input and every output path is authorized. Claim visual verification only for images actually inspected; structural readback and Slide lint are not pixel-level proof.
-- Product telemetry sends only the allowlisted anonymous events defined in `docs/architecture.md`, from the Host process and the package lifecycle entry, and must never alter install, activation, command, or uninstall behavior. An empty endpoint, `DO_NOT_TRACK`, or `telemetry: false` must silence every entry point; never add analytics SDKs, client keys, retries, or payload fields outside the allowlist.
-
-## 6. TypeScript and error contracts
+## 3. TypeScript
 
 - Use ESM, explicit `.ts` relative imports, and top-level `import type` declarations. Keep `strict`, `noUncheckedIndexedAccess`, `exactOptionalPropertyTypes`, and `verbatimModuleSyntax` passing.
 - Do not bypass type safety with broad assertions or unexplained `any`.
-- Handle closed unions exhaustively by discriminant.
-- Define stable errors in the layer that owns the failure. HTTP and tool Consumers map those errors without parsing messages or exposing stacks, internal absolute paths, or raw subprocess output.
-- Comments and JSDoc explain non-obvious behavior, failure modes, timing, ownership, or security constraints. Do not restate code or preserve reasoning transcripts. An empty `catch` must name the expected failure it ignores.
-- Follow the surrounding format and naming. Avoid repository-wide cleanup during a scoped task.
+- Comments explain non-obvious behavior, failure modes, timing, ownership, or security constraints.
 
-## 7. Testing
+## 4. Testing
 
-- Test observable behavior and external effects, not implementation claims. Read files back after file operations and assert final state plus resource cleanup for lifecycle behavior.
-- Cover relevant success, rejection, cancellation, and race paths for new behavior.
-- Use temporary workspaces and dynamic ports. Tests must not depend on a global CLI, existing demo files, fixed ports, or leftover local processes.
-- Mock only expensive or nondeterministic external boundaries such as network and time. Prefer real Service, Router, Gateway, and package entry paths elsewhere.
-- Keep source and artifact validation separate: typecheck `src/`; integration tests consume artifacts generated from the same checkout immediately before the test.
-- Place each test by what it loads: `test/unit/` imports source and needs no build or Gateway; `test/integration/` loads built `lib/` or `artifacts/`; `test/e2e/` drives a real render browser. Name files `*.test.ts`, assert with Vitest `expect`, and build on `test/support/` (Gateway harness, ports, OOXML builders and readers, render browser) rather than local copies.
-- Integration and e2e files own their Gateway through `startGateway()`, and steps within a file may share state in order. Each file seeds what it needs, for example with `populateTrunk()`, and never depends on another file.
-- A bug fix lands with a regression test whose name carries the issue number, such as `it('keeps explicit left-to-right bidi on docx round-trip (#91)')`.
-- Record a known, unfixed defect as `it.fails` with its issue number, holding only the defective step; setup belongs in hooks that must pass, so an unrelated failure cannot satisfy it. When an upgrade turns an `it.fails` red, the defect is fixed: switch it to `it` and close the issue.
-- Commit small binary fixtures under `test/fixtures/` only when a builder in `test/support/` cannot produce them, and record their provenance in `test/fixtures/README.md`.
-
-## 8. Documentation, generated files, and workspace safety
-
-- Keep public README sections such as How it works, Built-in tools, and Development written for users or external contributors. Internal layering, trust boundaries, protocol details, and packaging decisions belong in `docs/architecture.md` or this file.
-- Update both READMEs for any user-visible capability, configuration, or limitation change. Update the relevant core or Unit skill when a model workflow changes.
-- Do not hand-edit or commit `lib/`, `artifacts/`, `dist/`, `*.tgz`, or `*.zip`. Run `scripts/build-dist.sh` only when explicitly producing release artifacts.
-- Exact Univer SDK, API Reference, and insiders versions form one cross-application compatibility contract. Upgrade them as one compatible family and run the full build and integration suite. Install and validate native dependencies on the target platform; never copy `node_modules` between platforms as a release artifact.
-- Inspect `git status` before editing. Preserve staged, unstaged, and untracked user work, including intentional manifest and lockfile versions. Run dependency installation only when the task requires dependency changes.
-- Prefer `rg` and `rg --files`. Modify only files required by the task and never revert unrelated changes.
+- Test observable behavior. Place kernel tests in `test/unit/pptx-kernel.test.ts`.
+- A bug fix lands with a regression test.
+- Do not commit user `.pptx` files. `packages/pptx-kernel/.gitignore` ignores `web/*.pptx`.

@@ -1,0 +1,443 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <title>PPT</title>
+    <style>
+      body {
+        margin: 0;
+        background: #fff;
+        color: #00141a;
+        font:
+          14px/1.4 'Segoe UI',
+          sans-serif;
+      }
+      header {
+        display: flex;
+        gap: 8px;
+        align-items: center;
+        padding: 12px 16px;
+        background: #fff;
+        border-bottom: 1px solid rgba(0, 20, 26, 0.08);
+      }
+      button {
+        height: 32px;
+        padding: 0 14px;
+        border: 1px solid rgba(0, 20, 26, 0.08);
+        border-radius: 16px;
+        background: #fff;
+      }
+      button.primary {
+        border: none;
+        background: #00141a;
+        color: #fff;
+      }
+      button.current {
+        border-color: #14a6ea;
+      }
+      button.add-slide {
+        display: flex;
+        gap: 8px;
+        align-items: flex-start;
+        width: 100%;
+        height: auto;
+        margin: 0 0 14px;
+        padding: 0;
+        border: none;
+        border-radius: 0;
+        background: transparent;
+      }
+      .add-card {
+        display: flex;
+        flex: none;
+        align-items: center;
+        justify-content: center;
+        box-sizing: border-box;
+        width: 148px;
+        height: 84px;
+        border: 1px dashed rgba(0, 20, 26, 0.28);
+        border-radius: 2px;
+        background: #fff;
+        color: rgba(0, 20, 26, 0.55);
+        font-size: 28px;
+        line-height: 1;
+      }
+      button.thumb {
+        display: flex;
+        gap: 8px;
+        align-items: flex-start;
+        width: 100%;
+        height: auto;
+        margin: 0 0 14px;
+        padding: 0;
+        border: none;
+        border-radius: 0;
+        background: transparent;
+      }
+      button.thumb canvas {
+        flex: none;
+        width: 148px;
+        background: #fff;
+        box-shadow: none;
+        outline: 1px solid rgba(0, 20, 26, 0.16);
+      }
+      button.thumb:hover canvas {
+        outline: 2px solid #14a6ea;
+      }
+      button.thumb.current .thumb-index {
+        color: #d24726;
+        font-weight: 700;
+      }
+      button.thumb.current canvas,
+      button.thumb.current:hover canvas {
+        outline: 2px solid #d24726;
+      }
+      button.thumb {
+        transition: transform 80ms linear;
+      }
+      button.thumb.dragging {
+        opacity: 0.35;
+      }
+      #thumb-ghost {
+        position: fixed;
+        z-index: 6;
+        pointer-events: none;
+        outline: 2px solid #14a6ea;
+        background: #fff;
+      }
+      #thumb-ghost[hidden] {
+        display: none;
+      }
+      button.thumb.drop-before canvas {
+        box-shadow: inset 0 3px 0 #14a6ea;
+      }
+      button.thumb.drop-after canvas {
+        box-shadow: inset 0 -3px 0 #14a6ea;
+      }
+      .slide-menu {
+        position: fixed;
+        z-index: 5;
+        display: flex;
+        flex-direction: column;
+        min-width: 112px;
+        padding: 4px;
+        background: #fff;
+        border: 1px solid rgba(0, 20, 26, 0.12);
+        border-radius: 8px;
+        box-shadow: 0 8px 24px rgba(0, 20, 26, 0.16);
+      }
+      .slide-menu[hidden] {
+        display: none;
+      }
+      .slide-menu button {
+        height: 32px;
+        padding: 0 10px;
+        border: none;
+        border-radius: 6px;
+        background: transparent;
+        text-align: left;
+      }
+      .slide-menu button:hover {
+        background: #f2f4f5;
+      }
+      .thumb-index {
+        flex: none;
+        width: 18px;
+        padding-top: 2px;
+        color: rgba(0, 20, 26, 0.55);
+        font-size: 12px;
+        text-align: right;
+      }
+      #file-name {
+        flex: 1;
+        overflow: hidden;
+        color: rgba(0, 20, 26, 0.62);
+        font-size: 13px;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      button:disabled {
+        opacity: 0.45;
+      }
+      main {
+        display: flex;
+        height: calc(100vh - 57px);
+      }
+      .thumbs {
+        flex: none;
+        width: 216px;
+        height: 100%;
+        padding: 16px 12px 16px 8px;
+        overflow: auto;
+        background: #e8eaec;
+        box-sizing: border-box;
+      }
+      .stage {
+        display: flex;
+        flex: 1;
+        flex-direction: column;
+        min-width: 0;
+        height: 100%;
+        background: #f3f5f6;
+        box-sizing: border-box;
+      }
+      .viewport {
+        display: flex;
+        flex: 1;
+        justify-content: center;
+        min-height: 0;
+        padding: 24px;
+        overflow: auto;
+      }
+      .zoombar {
+        display: flex;
+        flex: none;
+        align-items: center;
+        justify-content: flex-end;
+        gap: 6px;
+        height: 24px;
+        padding: 0 12px;
+        border-top: 1px solid rgba(0, 20, 26, 0.08);
+        background: #fff;
+        color: #3a3a3a;
+        font-size: 12px;
+        line-height: 1;
+      }
+      .zoombar button {
+        width: 18px;
+        height: 18px;
+        padding: 0;
+        border: none;
+        border-radius: 2px;
+        background: transparent;
+        color: #3a3a3a;
+        font-size: 14px;
+        line-height: 18px;
+      }
+      .zoombar button:hover {
+        background: rgba(0, 20, 26, 0.06);
+      }
+      .zoombar input {
+        width: 108px;
+        height: 16px;
+        margin: 0;
+        padding: 0;
+        appearance: none;
+        background: transparent;
+      }
+      .zoombar input:focus-visible {
+        outline: none;
+      }
+      .zoombar input::-webkit-slider-runnable-track {
+        height: 2px;
+        border-radius: 1px;
+        background: #bdbdbd;
+      }
+      .zoombar input::-webkit-slider-thumb {
+        width: 8px;
+        height: 14px;
+        margin-top: -6px;
+        appearance: none;
+        border: 0;
+        border-radius: 1px;
+        background: #3a3a3a;
+      }
+      .zoombar input::-moz-range-track {
+        height: 2px;
+        border: 0;
+        border-radius: 1px;
+        background: #bdbdbd;
+      }
+      .zoombar input::-moz-range-thumb {
+        width: 8px;
+        height: 14px;
+        border: 0;
+        border-radius: 1px;
+        background: #3a3a3a;
+      }
+      #zoom-label {
+        min-width: 36px;
+        font-variant-numeric: tabular-nums;
+        text-align: right;
+      }
+      #handles {
+        position: absolute;
+        z-index: 2;
+        box-sizing: border-box;
+        pointer-events: none;
+      }
+      #handles[hidden] {
+        display: none;
+      }
+      #handles.cropping {
+        outline: 1px dashed #14a6ea;
+      }
+      .handle,
+      #crop-shape {
+        position: absolute;
+        pointer-events: auto;
+      }
+      .handle {
+        width: 9px;
+        height: 9px;
+        margin: 0;
+        padding: 0;
+        border: 1px solid #14a6ea;
+        border-radius: 0;
+        background: #fff;
+        transform: translate(-50%, -50%);
+      }
+      .handle[data-handle='nw'] {
+        left: 0;
+        top: 0;
+        cursor: nwse-resize;
+      }
+      .handle[data-handle='n'] {
+        left: 50%;
+        top: 0;
+        cursor: ns-resize;
+      }
+      .handle[data-handle='ne'] {
+        left: 100%;
+        top: 0;
+        cursor: nesw-resize;
+      }
+      .handle[data-handle='e'] {
+        left: 100%;
+        top: 50%;
+        cursor: ew-resize;
+      }
+      .handle[data-handle='se'] {
+        left: 100%;
+        top: 100%;
+        cursor: nwse-resize;
+      }
+      .handle[data-handle='s'] {
+        left: 50%;
+        top: 100%;
+        cursor: ns-resize;
+      }
+      .handle[data-handle='sw'] {
+        left: 0;
+        top: 100%;
+        cursor: nesw-resize;
+      }
+      .handle[data-handle='w'] {
+        left: 0;
+        top: 50%;
+        cursor: ew-resize;
+      }
+      #crop-shape {
+        top: -34px;
+        right: 0;
+        height: 26px;
+        padding: 0 8px;
+        border-radius: 6px;
+      }
+      #crop-shape[aria-pressed='true'] {
+        border-color: #14a6ea;
+        background: #e8f6fd;
+      }
+      .sheet {
+        position: relative;
+        align-self: flex-start;
+        height: fit-content;
+      }
+      canvas {
+        display: block;
+        background: #fff;
+      }
+      .sheet canvas {
+        box-shadow: 0 8px 24px rgba(0, 0, 0, 0.12);
+      }
+      .sheet.page-selected canvas {
+        outline: 2px solid #d24726;
+      }
+      #editor-frame {
+        position: absolute;
+        box-sizing: border-box;
+        display: flex;
+        flex-direction: column;
+        overflow: hidden;
+      }
+      #editor-frame[hidden] {
+        display: none;
+      }
+      #editor {
+        width: 100%;
+        min-height: 1em;
+        outline: none;
+        background: transparent;
+        white-space: pre-wrap;
+        overflow-wrap: anywhere;
+        caret-color: currentColor;
+      }
+    </style>
+  </head>
+  <body>
+    <header>
+      <button id="open" type="button">打开</button>
+      <input
+        id="file"
+        type="file"
+        accept=".pptx,application/vnd.openxmlformats-officedocument.presentationml.presentation"
+        hidden
+      />
+      <span id="file-name">点「打开」选择 pptx。这个页面读不到磁盘目录。</span>
+      <button id="discard" type="button" disabled>放弃</button>
+      <button id="save" class="primary" type="button" disabled>保存</button>
+    </header>
+    <main>
+      <nav id="thumbs" class="thumbs" aria-label="幻灯片">
+        <button id="add-slide" class="add-slide" type="button" disabled aria-label="新增幻灯片">
+          <span class="thumb-index" aria-hidden="true"></span>
+          <span class="add-card">+</span>
+        </button>
+      </nav>
+      <div class="stage">
+        <div class="viewport" id="viewport">
+          <div class="sheet" id="sheet">
+            <canvas id="slide"></canvas>
+            <div id="handles" hidden>
+              <button class="handle" type="button" data-handle="nw" aria-label="左上"></button>
+              <button class="handle" type="button" data-handle="n" aria-label="上"></button>
+              <button class="handle" type="button" data-handle="ne" aria-label="右上"></button>
+              <button class="handle" type="button" data-handle="e" aria-label="右"></button>
+              <button class="handle" type="button" data-handle="se" aria-label="右下"></button>
+              <button class="handle" type="button" data-handle="s" aria-label="下"></button>
+              <button class="handle" type="button" data-handle="sw" aria-label="左下"></button>
+              <button class="handle" type="button" data-handle="w" aria-label="左"></button>
+              <button id="crop-shape" type="button" aria-pressed="false">裁剪</button>
+            </div>
+            <div id="editor-frame" hidden>
+              <div
+                id="editor"
+                contenteditable="true"
+                spellcheck="false"
+                role="textbox"
+                aria-multiline="true"
+                aria-label="幻灯片文字"
+              ></div>
+            </div>
+          </div>
+        </div>
+        <div class="zoombar">
+          <button id="zoom-out" type="button" aria-label="缩小">−</button>
+          <input id="zoom" type="range" min="10" max="400" value="100" aria-label="缩放" />
+          <button id="zoom-in" type="button" aria-label="放大">+</button>
+          <span id="zoom-label">100%</span>
+        </div>
+      </div>
+    </main>
+    <div id="thumb-ghost" hidden></div>
+    <div id="shape-menu" class="slide-menu" hidden role="menu">
+      <button id="copy-shape" type="button" role="menuitem">复制</button>
+      <button id="delete-shape" type="button" role="menuitem">删除</button>
+    </div>
+    <div id="slide-menu" class="slide-menu" hidden role="menu">
+      <button id="copy-slide" type="button" role="menuitem">复制</button>
+      <button id="delete-slide" type="button" role="menuitem">删除</button>
+    </div>
+    <script type="module" src="./editor.js?v=16"></script>
+  </body>
+</html>
