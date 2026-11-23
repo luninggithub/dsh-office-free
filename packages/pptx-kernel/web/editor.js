@@ -590,7 +590,8 @@ function buildSlideScene(read, slideIndex) {
     slideKinds: kindsOf(slideMarkers),
     layoutKinds: kindsOf(layoutMarkers),
     hf: headerFooter(slideXml, layoutXml, masterXml),
-    slideNumber: slideIndex + 1
+    slideNumber: slideIndex + 1,
+    read
   };
   const size = readSlideSize(presentation);
   const shapes = [];
@@ -774,6 +775,7 @@ function paintTree(deck, xml, from, to, shapes, walk) {
     if (!includeShape(marker, walk.mode, deck)) continue;
     if (element.name === "graphicFrame") {
       paintTable(deck, xml, element, shapes, walk);
+      paintChart(deck, xml, element, shapes, walk);
       continue;
     }
     const shape = buildShape(deck, xml, element, marker, walk);
@@ -816,6 +818,7 @@ function buildShape(deck, xml, element, marker, walk) {
     line: visual.line,
     shadow: visual.shadow,
     text,
+    chart: void 0,
     plain: plainOf(text),
     editable: walk.mode === "slide" && text !== void 0,
     selectable: walk.mode === "slide"
@@ -912,6 +915,107 @@ function cornerOf(xml, geom) {
   if (match?.[1] !== void 0) return readNumber(match[1]) / 1e5;
   return 16667 / 1e5;
 }
+var CHART_COLORS = ["#0b2545", "#1b7f79", "#c98a3c", "#6e8193", "#c3cfda", "#4f81bd"];
+function paintChart(deck, xml, element, shapes, walk) {
+  const link = findDescendant(xml, "chart", element.openEnd, element.closeStart);
+  const relationId = link === void 0 ? void 0 : attribute(link.attrs, "id", true);
+  const target = relationId === void 0 ? void 0 : walk.rels.get(relationId)?.target;
+  if (target === void 0) return;
+  const chartXml = deck.read(resolvePart(walk.partName, target));
+  if (chartXml === void 0) return;
+  const plot = findDescendant(chartXml, "doughnutChart") ?? findDescendant(chartXml, "pieChart");
+  if (plot === void 0) return;
+  const series = direct2(chartXml, plot, "ser");
+  if (series === void 0) return;
+  const identity = identityOf(xml, element);
+  const xfrm = shapeXfrm(xml, element) ?? EMPTY_XFRM;
+  const placed = place(walk, xfrm.x, xfrm.y, xfrm.width, xfrm.height, xfrm.rotation);
+  const labels = cachedValues(chartXml, direct2(chartXml, series, "cat"));
+  const values = cachedValues(chartXml, direct2(chartXml, series, "val"));
+  const count = Math.max(labels.size, values.size);
+  const points = [];
+  for (let index = 0; index < count; index += 1) {
+    const value = Number(values.get(index) ?? "");
+    if (!Number.isFinite(value) || value <= 0) continue;
+    points.push({
+      label: labels.get(index) ?? "",
+      value,
+      color: sliceColor(deck, chartXml, series, index) ?? CHART_COLORS[index % CHART_COLORS.length] ?? "#0b2545"
+    });
+  }
+  if (points.length === 0) return;
+  const holeNode = direct2(chartXml, plot, "holeSize");
+  const hole = plot.name === "pieChart" ? 0 : readNumber(holeNode === void 0 ? void 0 : attribute(holeNode.attrs, "val"), 50) / 100;
+  const angleNode = direct2(chartXml, plot, "firstSliceAng");
+  const title = findDescendant(chartXml, "title");
+  shapes.push({
+    id: identity?.id ?? "chart",
+    name: identity?.name ?? "",
+    x: placed.x,
+    y: placed.y,
+    width: placed.width,
+    height: placed.height,
+    rotation: placed.rotation,
+    flipH: false,
+    flipV: false,
+    geometry: "rect",
+    corner: 0,
+    fill: NO_FILL,
+    line: void 0,
+    shadow: void 0,
+    text: void 0,
+    chart: {
+      kind: hole > 0 ? "doughnut" : "pie",
+      title: title === void 0 ? "" : plainText(chartXml, title.openEnd, title.closeStart),
+      hole: Math.min(0.9, Math.max(0, hole)),
+      start: readNumber(angleNode === void 0 ? void 0 : attribute(angleNode.attrs, "val")),
+      legend: findDescendant(chartXml, "legend") !== void 0,
+      points
+    },
+    plain: "",
+    editable: false,
+    selectable: walk.mode === "slide"
+  });
+}
+function cachedValues(xml, parent) {
+  const values = /* @__PURE__ */ new Map();
+  if (parent === void 0) return values;
+  const cache = findDescendant(xml, "strCache", parent.openEnd, parent.closeStart) ?? findDescendant(xml, "numCache", parent.openEnd, parent.closeStart);
+  if (cache === void 0) return values;
+  for (const point of childElements(xml, cache.openEnd, cache.closeStart)) {
+    if (point.name !== "pt") continue;
+    const value = direct2(xml, point, "v");
+    if (value === void 0) continue;
+    values.set(
+      readNumber(attribute(point.attrs, "idx")),
+      decodeXml(xml.slice(value.openEnd, value.closeStart))
+    );
+  }
+  return values;
+}
+function sliceColor(deck, xml, series, index) {
+  for (const point of childElements(xml, series.openEnd, series.closeStart)) {
+    if (point.name !== "dPt") continue;
+    const marker = direct2(xml, point, "idx");
+    if (readNumber(marker === void 0 ? void 0 : attribute(marker.attrs, "val"), -1) !== index) {
+      continue;
+    }
+    const props = direct2(xml, point, "spPr");
+    const fill = props === void 0 ? void 0 : direct2(xml, props, "solidFill");
+    const color = fill === void 0 ? void 0 : colorElement(xml, fill);
+    if (color === void 0) return void 0;
+    return cssColor(rgbOf(xml, color, deck.ctx));
+  }
+  return void 0;
+}
+function plainText(xml, from, to) {
+  let text = "";
+  for (const element of childElements(xml, from, to)) {
+    if (element.name === "t") text += decodeXml(xml.slice(element.openEnd, element.closeStart));
+    else text += plainText(xml, element.openEnd, element.closeStart);
+  }
+  return text;
+}
 function paintTable(deck, xml, element, shapes, walk) {
   const table = findDescendant(xml, "tbl", element.openEnd, element.closeStart);
   if (table === void 0) return;
@@ -955,6 +1059,7 @@ function paintTable(deck, xml, element, shapes, walk) {
           line: props === void 0 ? void 0 : cellLine(xml, props, deck),
           shadow: void 0,
           text,
+          chart: void 0,
           plain: plainOf(text),
           editable: false,
           selectable: false
@@ -982,7 +1087,7 @@ function cellText(deck, xml, cell) {
   const own = direct2(xml, body, "lstStyle");
   const rest = own === void 0 ? [] : [{ xml, element: own }];
   const props = direct2(xml, cell, "tcPr");
-  return paragraphs(deck, xml, body, deck.fallback, NO_FONT, rest, paddingOf(props), 1);
+  return paragraphs(deck, xml, body, deck.fallback, NO_FONT, rest, paddingOf(props), 1, "t", true);
 }
 function paddingOf(props) {
   return {
@@ -1005,10 +1110,11 @@ function paintText(deck, xml, element, marker, mode) {
     styleSpans(deck, xml, element, marker, mode),
     metrics.padding,
     metrics.fontScale,
-    metrics.anchor
+    metrics.anchor,
+    metrics.clip
   );
 }
-function paragraphs(deck, xml, body, fallback, font, rest, padding, fontScale, anchor = "t") {
+function paragraphs(deck, xml, body, fallback, font, rest, padding, fontScale, anchor = "t", clip = false) {
   const built = [];
   const counters = /* @__PURE__ */ new Map();
   for (const paragraph of childElements(xml, body.openEnd, body.closeStart)) {
@@ -1038,7 +1144,7 @@ function paragraphs(deck, xml, body, fallback, font, rest, padding, fontScale, a
       runs
     });
   }
-  return { anchor, padding, paragraphs: built };
+  return { anchor, padding, clip, paragraphs: built };
 }
 function styleSpans(deck, xml, element, marker, mode) {
   const spans = [];
@@ -1071,6 +1177,7 @@ function listStyle(xml, element) {
 }
 function bodyMetrics(deck, xml, element, marker, mode) {
   let anchor = "t";
+  let clip = false;
   let left = 91440;
   let top = 45720;
   let right = 91440;
@@ -1091,6 +1198,7 @@ function bodyMetrics(deck, xml, element, marker, mode) {
     if (props === void 0) continue;
     const value = attribute(props.attrs, "anchor");
     if (value === "ctr" || value === "b" || value === "t") anchor = value;
+    if (attribute(props.attrs, "vertOverflow") === "clip") clip = true;
     const lIns = attribute(props.attrs, "lIns");
     if (lIns !== void 0) left = readNumber(lIns);
     const tIns = attribute(props.attrs, "tIns");
@@ -1105,7 +1213,7 @@ function bodyMetrics(deck, xml, element, marker, mode) {
       fontScale = scale === void 0 ? 1 : readNumber(scale) / 1e5;
     }
   }
-  return { anchor, padding: { left, top, right, bottom }, fontScale };
+  return { anchor, padding: { left, top, right, bottom }, fontScale, clip };
 }
 function prototypes(deck, marker, mode) {
   if (marker === void 0 || mode === "master") return { layout: void 0, master: void 0 };
@@ -1680,9 +1788,17 @@ function crc32(bytes) {
 // packages/pptx-kernel/src/pptx.ts
 var textDecoder = new TextDecoder();
 var textEncoder2 = new TextEncoder();
+var IMAGE_TYPES = {
+  png: "image/png",
+  jpg: "image/jpeg",
+  jpeg: "image/jpeg",
+  gif: "image/gif",
+  webp: "image/webp"
+};
 var EMU_PER_PIXEL = 914400 / 96;
 var PptxDocument = class _PptxDocument {
   original;
+  initial;
   parts;
   order;
   edited = /* @__PURE__ */ new Map();
@@ -1690,6 +1806,7 @@ var PptxDocument = class _PptxDocument {
   dirty = false;
   constructor(original, parts, order) {
     this.original = original;
+    this.initial = new Map(parts);
     this.parts = parts;
     this.order = [...order];
   }
@@ -1743,6 +1860,77 @@ var PptxDocument = class _PptxDocument {
     if (edited !== void 0) return textEncoder2.encode(edited);
     const bytes = this.parts.get(name);
     return bytes === void 0 ? void 0 : bytes.slice();
+  }
+  /** Copy the editable package state. Added image bytes are copied; original parts are not. */
+  capture() {
+    const added = /* @__PURE__ */ new Map();
+    for (const [name, bytes] of this.parts) {
+      if (!this.initial.has(name)) added.set(name, bytes.slice());
+    }
+    return {
+      edited: new Map(this.edited),
+      order: [...this.order],
+      dirty: this.dirty,
+      present: new Set(this.parts.keys()),
+      added
+    };
+  }
+  /** Return the package to a previous `capture()`. */
+  restore(checkpoint) {
+    this.edited.clear();
+    for (const [name, xml] of checkpoint.edited) this.edited.set(name, xml);
+    for (const name of [...this.parts.keys()]) {
+      if (!checkpoint.present.has(name)) this.parts.delete(name);
+    }
+    for (const name of checkpoint.present) {
+      const added = checkpoint.added.get(name);
+      if (added !== void 0) {
+        this.parts.set(name, added.slice());
+        continue;
+      }
+      if (!this.parts.has(name)) {
+        const original = this.initial.get(name);
+        if (original !== void 0) this.parts.set(name, original);
+      }
+    }
+    this.order = [...checkpoint.order];
+    this.dirty = checkpoint.dirty;
+    this.scenes.clear();
+  }
+  /**
+   * Place a local image on a slide. `frame` is the axis-aligned box in slide EMU.
+   * Returns the new picture id.
+   */
+  insertPicture(slideIndex, image, frame) {
+    const extension = image.extension.toLowerCase();
+    const contentType = IMAGE_TYPES[extension];
+    if (contentType === void 0) throw new Error(`pptx: unsupported image .${extension}`);
+    if (image.bytes.byteLength === 0) throw new Error("pptx: image is empty");
+    const slide = this.slides()[slideIndex];
+    if (slide === void 0) throw new Error(`pptx: slide ${slideIndex} does not exist`);
+    const path = nextMediaPath(/* @__PURE__ */ new Set([...this.order, ...this.parts.keys()]), extension);
+    this.rememberBytes(path, image.bytes);
+    const relationId = this.ensureRelationship(
+      slide.partName,
+      "http://schemas.openxmlformats.org/officeDocument/2006/relationships/image",
+      `../media/${path.slice("ppt/media/".length)}`
+    );
+    const types = this.optionalText("[Content_Types].xml");
+    if (types !== void 0) {
+      this.remember("[Content_Types].xml", ensureImageDefault(types, extension, contentType));
+    }
+    const xml = this.text(slide.partName);
+    const tree = findDescendant(xml, "spTree");
+    if (tree === void 0) throw new Error("pptx: slide has no shape tree");
+    const id = String(nextShapeId(xml));
+    const picture = pictureXml(id, relationId, frame);
+    this.edited.set(
+      slide.partName,
+      xml.slice(0, tree.closeStart) + picture + xml.slice(tree.closeStart)
+    );
+    this.dirty = true;
+    this.scenes.delete(slideIndex);
+    return id;
   }
   /**
    * Replace the visible text of one shape. Characters that did not change stay in their
@@ -1820,6 +2008,7 @@ var PptxDocument = class _PptxDocument {
         copy = copy.replace(/(embed=")[^"]*(")/, `$1${id}$2`);
       }
     }
+    copy = this.copyChartRelation(source.partName, target.partName, copy);
     const tree = findDescendant(this.text(target.partName), "spTree");
     if (tree === void 0) throw new Error("pptx: slide has no shape tree");
     const next = this.text(target.partName);
@@ -1940,6 +2129,11 @@ var PptxDocument = class _PptxDocument {
     this.edited.set(name, xml);
     if (!this.order.includes(name)) this.order.push(name);
   }
+  rememberBytes(name, bytes) {
+    this.edited.delete(name);
+    this.parts.set(name, bytes.slice());
+    if (!this.order.includes(name)) this.order.push(name);
+  }
   forget(name) {
     this.edited.delete(name);
     this.parts.delete(name);
@@ -1954,6 +2148,19 @@ var PptxDocument = class _PptxDocument {
     this.edited.set(slide.partName, change(xml, located));
     this.dirty = true;
     this.scenes.delete(slideIndex);
+  }
+  /** Keep a copied chart frame pointing at the same chart part on the destination slide. */
+  copyChartRelation(sourcePart, targetPart, fragment) {
+    const chart = findDescendant(fragment, "chart");
+    if (chart === void 0) return fragment;
+    const relationId = attribute(chart.attrs, "id", true);
+    if (relationId === void 0) return fragment;
+    const relation = this.slideRelations(sourcePart).get(relationId);
+    if (relation === void 0) return fragment;
+    const id = this.ensureRelationship(targetPart, relation.type, relation.target);
+    const attrs = chart.attrs.replace(/([A-Za-z_][\w.-]*:id=")[^"]*(")/, `$1${id}$2`);
+    const body = fragment.slice(chart.start, chart.end).replace(chart.attrs, attrs);
+    return fragment.slice(0, chart.start) + body + fragment.slice(chart.end);
   }
   ensureRelationship(partName, type, target) {
     const relsName = slideRelsName(partName);
@@ -2069,7 +2276,7 @@ function collectShapes(xml, partName, from, to, relations, origin) {
       );
       continue;
     }
-    if (element.name !== "sp" && element.name !== "pic") continue;
+    if (element.name !== "sp" && element.name !== "pic" && element.name !== "graphicFrame") continue;
     const id = readShapeId(xml, element);
     if (id === void 0) continue;
     const xfrm = shapeXfrm(xml, element) ?? EMPTY_XFRM;
@@ -2107,22 +2314,23 @@ function findShapeIn(xml, from, to, shapeId) {
       if (nested !== void 0) return nested;
       continue;
     }
-    if ((element.name === "sp" || element.name === "pic") && readShapeId(xml, element) === shapeId) {
+    if ((element.name === "sp" || element.name === "pic" || element.name === "graphicFrame") && readShapeId(xml, element) === shapeId) {
       return element;
     }
   }
   return void 0;
 }
+var SHAPE_MARKERS = /* @__PURE__ */ new Set(["nvSpPr", "nvPicPr", "nvCxnSpPr", "nvGraphicFramePr"]);
 function readShapeId(xml, element) {
   const properties = childElements(xml, element.openEnd, element.closeStart);
-  const holder = properties.find((item) => item.name === "nvSpPr" || item.name === "nvPicPr");
+  const holder = properties.find((item) => SHAPE_MARKERS.has(item.name));
   const range = holder ?? element;
   const marker = findDescendant(xml, "cNvPr", range.openEnd, range.closeStart);
   return marker === void 0 ? void 0 : attribute(marker.attrs, "id");
 }
 function shapeName(xml, element) {
   const properties = childElements(xml, element.openEnd, element.closeStart);
-  const holder = properties.find((item) => item.name === "nvSpPr" || item.name === "nvPicPr");
+  const holder = properties.find((item) => SHAPE_MARKERS.has(item.name));
   const range = holder ?? element;
   const marker = findDescendant(xml, "cNvPr", range.openEnd, range.closeStart);
   return marker === void 0 ? "" : attribute(marker.attrs, "name") ?? "";
@@ -2288,7 +2496,7 @@ function walkShapes(xml, from, to, shapeId, parent) {
       if (found !== void 0) return found;
       continue;
     }
-    if ((element.name === "sp" || element.name === "pic") && readShapeId(xml, element) === shapeId) {
+    if ((element.name === "sp" || element.name === "pic" || element.name === "graphicFrame") && readShapeId(xml, element) === shapeId) {
       return { element, parent, local: shapeXfrm(xml, element) ?? EMPTY_XFRM };
     }
   }
@@ -2446,6 +2654,26 @@ function insertRelationship(xml, id, target, type = "http://schemas.openxmlforma
   if (close < 0) throw new Error("pptx: presentation relationships are missing");
   return xml.slice(0, close) + tag + xml.slice(close);
 }
+function nextMediaPath(names, extension) {
+  let max = 0;
+  for (const name of names) {
+    const match = /^ppt\/media\/image(\d+)\.[^.]+$/.exec(name);
+    if (match?.[1] !== void 0) max = Math.max(max, Number(match[1]));
+  }
+  return `ppt/media/image${max + 1}.${extension}`;
+}
+function ensureImageDefault(xml, extension, contentType) {
+  if (xml.includes(`Extension="${extension}"`)) return xml;
+  const tag = `<Default Extension="${extension}" ContentType="${contentType}"/>`;
+  const close = xml.lastIndexOf("</Types>");
+  if (close < 0) return xml;
+  return xml.slice(0, close) + tag + xml.slice(close);
+}
+function pictureXml(id, relationId, frame) {
+  const off = `<a:off x="${Math.round(frame.x)}" y="${Math.round(frame.y)}"/>`;
+  const ext = `<a:ext cx="${Math.max(1, Math.round(frame.width))}" cy="${Math.max(1, Math.round(frame.height))}"/>`;
+  return `<p:pic><p:nvPicPr><p:cNvPr id="${id}" name="Picture ${id}"/><p:cNvPicPr><a:picLocks noChangeAspect="1"/></p:cNvPicPr><p:nvPr/></p:nvPicPr><p:blipFill><a:blip r:embed="${relationId}"/><a:stretch><a:fillRect/></a:stretch></p:blipFill><p:spPr><a:xfrm>${off}${ext}</a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></p:spPr></p:pic>`;
+}
 function insertContentType(xml, partName) {
   const part = `/${partName}`;
   if (xml.includes(`PartName="${part}"`)) return xml;
@@ -2503,12 +2731,16 @@ var page = {
 };
 var pressing = false;
 var painting = false;
+var applyingHistory = false;
 var plainOpen = readPlainOpen();
+var history = [];
 var menuIndex = -1;
 var drag = null;
 var shapeGesture = null;
 var openButton = document.querySelector("#open");
+var insertImageButton = document.querySelector("#insert-image");
 var fileInput = document.querySelector("#file");
+var imageInput = document.querySelector("#image-file");
 var fileName = document.querySelector("#file-name");
 var saveButton = document.querySelector("#save");
 var discardButton = document.querySelector("#discard");
@@ -2538,10 +2770,20 @@ openButton?.addEventListener("click", () => {
   if (plainOpen || filePicker() === void 0 || embeddedFrame()) choosePlainFile();
   else void pickFile();
 });
+insertImageButton?.addEventListener("click", () => {
+  if (imageInput === null) return;
+  imageInput.value = "";
+  imageInput.click();
+});
 fileInput?.addEventListener("change", () => {
   const file = fileInput.files?.[0];
   fileInput.value = "";
   if (file !== void 0) void openFile(file);
+});
+imageInput?.addEventListener("change", () => {
+  const file = imageInput.files?.[0];
+  imageInput.value = "";
+  if (file !== void 0) void insertLocalImage(file);
 });
 saveButton?.addEventListener("click", () => {
   void saveCurrent();
@@ -2577,17 +2819,25 @@ window.addEventListener("keydown", (event) => {
     }
     return;
   }
+  const command = event.ctrlKey || event.metaKey;
+  const key = event.key.toLowerCase();
+  if (command && key === "z" && !event.shiftKey && !fieldTarget()) {
+    event.preventDefault();
+    undo();
+    return;
+  }
   if (typingTarget()) return;
   if (event.key === "Delete" || event.key === "Backspace") {
     event.preventDefault();
     deleteSelectedShape();
     return;
   }
-  if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "c") {
+  if (command && key === "c") {
     if (copySelectedPicture()) event.preventDefault();
     return;
   }
-  if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "v") {
+  if (command && key === "v") {
+    if (page.clip === null) return;
     event.preventDefault();
     pastePicture();
   }
@@ -2679,6 +2929,7 @@ sheet?.addEventListener("pointerdown", (event) => {
   const sameText = page.editing && shape?.id === page.selectedId && editor !== null && (event.target === editor || editor.contains(event.target));
   if (sameText) return;
   event.preventDefault();
+  focusSheet();
   const previous = page.selectedId;
   const content = shape !== void 0 && isContent(shape);
   page.pageSelected = !content;
@@ -2740,12 +2991,12 @@ handles?.addEventListener("pointerdown", (event) => {
   const handle = event.target instanceof Element ? event.target.closest("[data-handle]") : null;
   if (handle === null) return;
   const shape = selected();
-  if (shape === void 0 || shape.fill.kind !== "picture") return;
+  if (shape === void 0 || !hasFrameHandles(shape)) return;
   event.preventDefault();
   event.stopPropagation();
   const shown = shownShape(shape);
   shapeGesture = {
-    kind: page.cropping ? "crop" : "resize",
+    kind: page.cropping && shape.fill.kind === "picture" ? "crop" : "resize",
     id: shape.id,
     pointerId: event.pointerId,
     startClientX: event.clientX,
@@ -2781,7 +3032,7 @@ canvas?.addEventListener("mousemove", (event) => {
     canvas.style.cursor = "move";
     return;
   }
-  canvas.style.cursor = shape?.editable === true ? "text" : "default";
+  canvas.style.cursor = shape !== void 0 && canMove(shape) && !page.editing && (shape.chart !== void 0 || shape.id === selectedShape?.id) ? "move" : shape?.editable === true ? "text" : "default";
 });
 editor?.addEventListener("input", (event) => {
   if (event.isComposing) return;
@@ -2938,6 +3189,60 @@ async function openFile(file) {
   page.servedName = null;
   await openBytes(new Uint8Array(await file.arrayBuffer()), file.name);
 }
+async function insertLocalImage(file) {
+  const doc = page.doc;
+  if (doc === null) return;
+  const extension = imageExtension(file.name);
+  if (extension === void 0) {
+    note("\u53EA\u652F\u6301 PNG\u3001JPEG\u3001GIF \u548C WebP");
+    return;
+  }
+  let recorded = false;
+  try {
+    const bytes = new Uint8Array(await file.arrayBuffer());
+    const bitmap = await createImageBitmap(new Blob([toBuffer(bytes)]));
+    const size = doc.slideSize();
+    const frame = fittedPicture(size.width, size.height, bitmap.width, bitmap.height);
+    rememberHistory();
+    recorded = true;
+    const id = doc.insertPicture(page.slideIndex, { bytes, extension }, frame);
+    const shape = doc.scene(page.slideIndex).shapes.find((item) => item.id === id);
+    if (shape?.fill.kind === "picture") page.images.set(shape.fill.imagePath, bitmap);
+    else bitmap.close();
+    page.selectedId = id;
+    page.pageSelected = false;
+    page.editing = false;
+    page.cropping = false;
+    markDirty();
+    focusSheet();
+    render();
+  } catch (error) {
+    if (recorded) history.pop();
+    note(error instanceof Error ? error.message : "\u65E0\u6CD5\u63D2\u5165\u56FE\u7247");
+  }
+}
+function imageExtension(name) {
+  const extension = /\.([a-z0-9]+)$/i.exec(name)?.[1]?.toLowerCase();
+  if (extension === "png" || extension === "jpg" || extension === "jpeg" || extension === "gif" || extension === "webp") {
+    return extension;
+  }
+  return void 0;
+}
+function fittedPicture(slideWidth, slideHeight, pixelWidth, pixelHeight) {
+  const maxWidth = slideWidth * 0.45;
+  const maxHeight = slideHeight * 0.45;
+  let width = Math.max(1, pixelWidth) * EMU_PER_PIXEL;
+  let height = Math.max(1, pixelHeight) * EMU_PER_PIXEL;
+  const scale = Math.min(1, maxWidth / width, maxHeight / height);
+  width = Math.max(1, Math.round(width * scale));
+  height = Math.max(1, Math.round(height * scale));
+  return {
+    x: Math.max(0, Math.round((slideWidth - width) / 2)),
+    y: Math.max(0, Math.round((slideHeight - height) / 2)),
+    width,
+    height
+  };
+}
 async function openBytes(bytes, label) {
   const saved = bytes.slice();
   try {
@@ -2946,8 +3251,10 @@ async function openBytes(bytes, label) {
     page.doc = null;
     page.saved = null;
     clearDirty();
+    history.length = 0;
     if (saveButton !== null) saveButton.disabled = true;
     if (addButton !== null) addButton.disabled = true;
+    if (insertImageButton !== null) insertImageButton.disabled = true;
     note(error instanceof Error ? error.message : "\u65E0\u6CD5\u6253\u5F00\u8FD9\u4E2A\u6587\u4EF6");
     render();
     return;
@@ -2965,9 +3272,11 @@ async function openBytes(bytes, label) {
   page.clip = null;
   setZoom(1, false);
   page.images.clear();
+  history.length = 0;
   clearDirty();
   if (saveButton !== null) saveButton.disabled = false;
   if (addButton !== null) addButton.disabled = false;
+  if (insertImageButton !== null) insertImageButton.disabled = false;
   note(label);
   await loadImages();
   render();
@@ -2987,6 +3296,7 @@ async function saveCurrent() {
     page.selectedId = selectedId;
     page.editing = false;
     page.editorShape = void 0;
+    history.length = 0;
     clearDirty();
     note(page.label.length > 0 ? page.label : "\u5DF2\u4FDD\u5B58");
     await loadImages();
@@ -3028,6 +3338,7 @@ async function discardEdits() {
   page.editorShape = void 0;
   page.thumbIndex = -1;
   page.images.clear();
+  history.length = 0;
   clearDirty();
   note(page.label);
   await loadImages();
@@ -3036,12 +3347,14 @@ async function discardEdits() {
 function addSlide() {
   const doc = page.doc;
   if (doc === null) return;
+  rememberHistory();
   page.slideIndex = doc.addSlide(page.slideIndex);
   finishStructureChange();
 }
 function duplicateAt(index) {
   const doc = page.doc;
   if (doc === null || doc.slides()[index] === void 0) return;
+  rememberHistory();
   page.slideIndex = doc.duplicateSlide(index);
   finishStructureChange();
   void loadImages();
@@ -3049,6 +3362,7 @@ function duplicateAt(index) {
 function deleteAt(index) {
   const doc = page.doc;
   if (doc === null || doc.slides().length <= 1 || doc.slides()[index] === void 0) return;
+  rememberHistory();
   doc.deleteSlide(index);
   page.slideIndex = Math.min(index, doc.slides().length - 1);
   finishStructureChange();
@@ -3126,12 +3440,15 @@ function commitEditor() {
   const shape = selected();
   if (doc === null || shape === void 0 || !shape.editable) return;
   const grid = readEditorGrid(editor);
+  const plain = editorPlain(editor);
+  if (sameEditorText(shape, grid, plain)) return;
   const offset = grid === void 0 ? caretOffset(editor) : 0;
+  rememberHistory();
   try {
-    if (grid === void 0)
-      doc.setShapeText(page.slideIndex, shape.id, (editor.textContent ?? "").replace(/\r\n/g, "\n"));
+    if (grid === void 0) doc.setShapeText(page.slideIndex, shape.id, plain);
     else doc.setShapeRuns(page.slideIndex, shape.id, grid);
   } catch (error) {
+    history.pop();
     note(error instanceof Error ? error.message : "\u65E0\u6CD5\u4FEE\u6539\u6587\u5B57");
     return;
   }
@@ -3147,12 +3464,15 @@ function placeEditor(shape) {
   if (editorFrame === null || editor === null) return;
   const scale = page.scale;
   const text = shape.text;
-  const run = text?.paragraphs[0]?.runs[0];
   const paragraph = text?.paragraphs[0];
   editorFrame.style.left = `${shape.x / EMU_PER_PIXEL * scale}px`;
   editorFrame.style.top = `${shape.y / EMU_PER_PIXEL * scale}px`;
   editorFrame.style.width = `${shape.width / EMU_PER_PIXEL * scale}px`;
-  editorFrame.style.height = `${shape.height / EMU_PER_PIXEL * scale}px`;
+  const overflowing = text?.clip === false;
+  editorFrame.classList.toggle("overflowing", overflowing);
+  editorFrame.style.overflow = overflowing ? "visible" : "hidden";
+  editorFrame.style.height = overflowing ? "auto" : `${shape.height / EMU_PER_PIXEL * scale}px`;
+  editorFrame.style.minHeight = overflowing ? `${shape.height / EMU_PER_PIXEL * scale}px` : "";
   editorFrame.style.transform = `rotate(${shape.rotation}deg)`;
   const pad = text?.padding;
   editorFrame.style.padding = pad === void 0 ? "0" : `${pad.top / EMU_PER_PIXEL * scale}px ${pad.right / EMU_PER_PIXEL * scale}px ${pad.bottom / EMU_PER_PIXEL * scale}px ${pad.left / EMU_PER_PIXEL * scale}px`;
@@ -3165,8 +3485,7 @@ function placeEditor(shape) {
   editor.style.color = "";
   editor.style.textDecoration = "";
   editor.style.textAlign = paragraph?.align === "ctr" ? "center" : paragraph?.align === "r" ? "right" : "left";
-  const line = paragraph === void 0 ? (run?.fontSize ?? 18) * 96 / 72 * 1.2 : lineBox(run, paragraph);
-  editor.style.lineHeight = `${line * scale}px`;
+  editor.style.lineHeight = "normal";
 }
 function paintEditor(shape) {
   const grid = (shape.text?.paragraphs ?? []).map(
@@ -3177,18 +3496,27 @@ function paintEditor(shape) {
 function paintGrid(shape, grid) {
   if (editor === null) return;
   const paragraphs2 = shape.text?.paragraphs ?? [];
+  const scale = page.scale;
   const nodes = [];
   painting = true;
   paragraphs2.forEach((paragraph, paragraphIndex) => {
-    if (paragraphIndex > 0) nodes.push(document.createTextNode("\n"));
+    const block = document.createElement("div");
+    block.dataset.p = String(paragraphIndex);
+    const box = paragraph.runs.reduce((max, run) => Math.max(max, lineBox(run, paragraph)), 0);
+    block.style.marginTop = `${paragraph.spaceBefore * 96 / 72 * scale}px`;
+    block.style.marginBottom = `${paragraph.spaceAfter * 96 / 72 * scale}px`;
+    block.style.lineHeight = `${(box || 1) * scale}px`;
+    block.style.textAlign = paragraph.align === "ctr" ? "center" : paragraph.align === "r" ? "right" : "left";
+    block.style.whiteSpace = "pre-wrap";
     paragraph.runs.forEach((run, runIndex) => {
       const span = document.createElement("span");
       span.dataset.p = String(paragraphIndex);
       span.dataset.r = String(runIndex);
       styleRun(span, run);
       span.textContent = grid[paragraphIndex]?.[runIndex] ?? run.text;
-      nodes.push(span);
+      block.append(span);
     });
+    nodes.push(block);
   });
   editor.replaceChildren(...nodes);
   painting = false;
@@ -3207,26 +3535,49 @@ function readEditorGrid(root) {
   const grid = [];
   for (const node of root.childNodes) {
     if (node.nodeType === Node.TEXT_NODE) {
-      if (node.textContent !== "\n") return void 0;
-      continue;
+      if ((node.textContent ?? "").length === 0) continue;
+      return void 0;
     }
-    if (!(node instanceof HTMLSpanElement)) return void 0;
+    if (!(node instanceof HTMLDivElement)) return void 0;
     const paragraphIndex = Number(node.dataset.p);
-    const runIndex = Number(node.dataset.r);
-    if (!Number.isInteger(paragraphIndex) || !Number.isInteger(runIndex)) return void 0;
-    const row = grid[paragraphIndex] ?? [];
-    if (row[runIndex] !== void 0) return void 0;
-    row[runIndex] = node.textContent ?? "";
-    grid[paragraphIndex] = row;
-  }
-  for (let index = 0; index < grid.length; index += 1) {
-    const row = grid[index];
-    if (row === void 0) return void 0;
+    if (!Number.isInteger(paragraphIndex) || grid[paragraphIndex] !== void 0) return void 0;
+    const row = [];
+    for (const child of node.childNodes) {
+      if (child.nodeType === Node.TEXT_NODE) {
+        if ((child.textContent ?? "").length === 0) continue;
+        return void 0;
+      }
+      if (!(child instanceof HTMLSpanElement)) return void 0;
+      const runIndex = Number(child.dataset.r);
+      if (!Number.isInteger(runIndex) || row[runIndex] !== void 0) return void 0;
+      row[runIndex] = child.textContent ?? "";
+    }
+    if (row.length === 0) row.push(node.textContent ?? "");
     for (let run = 0; run < row.length; run += 1) {
       if (row[run] === void 0) return void 0;
     }
+    grid[paragraphIndex] = row;
+  }
+  for (let index = 0; index < grid.length; index += 1) {
+    if (grid[index] === void 0) return void 0;
   }
   return grid;
+}
+function editorPlain(root) {
+  const blocks = [...root.children].filter(
+    (node) => node instanceof HTMLElement
+  );
+  if (blocks.length === 0) return (root.textContent ?? "").replace(/\r\n/g, "\n");
+  return blocks.map((block) => block.textContent ?? "").join("\n");
+}
+function sameEditorText(shape, grid, plain) {
+  if (grid === void 0) return plain === shape.plain;
+  const paragraphs2 = shape.text?.paragraphs ?? [];
+  if (grid.length !== paragraphs2.length) return false;
+  return paragraphs2.every((paragraph, index) => {
+    const row = grid[index];
+    return row !== void 0 && row.length === paragraph.runs.length && paragraph.runs.every((run, runIndex) => run.text === row[runIndex]);
+  });
 }
 function caretOffset(root) {
   const selection = document.getSelection();
@@ -3323,6 +3674,43 @@ function typingTarget() {
   const node = document.activeElement;
   return node === editor || node instanceof HTMLInputElement || node instanceof HTMLTextAreaElement;
 }
+function fieldTarget() {
+  const node = document.activeElement;
+  return node instanceof HTMLInputElement || node instanceof HTMLTextAreaElement;
+}
+function focusSheet() {
+  sheet?.focus({ preventScroll: true });
+}
+function rememberHistory() {
+  if (page.doc === null || applyingHistory) return;
+  history.push(page.doc.capture());
+  if (history.length > 50) history.shift();
+}
+function undo() {
+  const doc = page.doc;
+  const checkpoint = history.pop();
+  if (doc === null || checkpoint === void 0) return;
+  applyingHistory = true;
+  try {
+    doc.restore(checkpoint);
+    if (checkpoint.dirty) markDirty();
+    else clearDirty();
+    const current = doc.scene(page.slideIndex).shapes.find((shape) => shape.id === page.selectedId);
+    if (current === void 0) {
+      page.selectedId = void 0;
+      page.editing = false;
+    }
+    page.cropping = false;
+    page.live = void 0;
+    page.editorShape = void 0;
+    page.images.clear();
+  } finally {
+    applyingHistory = false;
+  }
+  void loadImages().then(() => {
+    render();
+  });
+}
 var THUMB_MIN = 96;
 var STAGE_MIN = 160;
 function thumbWidth(next) {
@@ -3341,10 +3729,16 @@ function setZoom(next, paint = true) {
   if (paint && page.doc !== null) render();
 }
 function canMove(shape) {
-  return shape.selectable && (shape.fill.kind === "picture" || shape.editable);
+  return shape.selectable && (shape.fill.kind === "picture" || shape.editable || shape.chart !== void 0);
 }
 function isContent(shape) {
-  return canMove(shape) && (shape.fill.kind === "picture" || shape.plain.length > 0);
+  return canMove(shape) && (shape.fill.kind === "picture" || shape.plain.length > 0 || shape.chart !== void 0);
+}
+function hasFrameHandles(shape) {
+  return shape.fill.kind === "picture" || shape.chart !== void 0;
+}
+function canCopy(shape) {
+  return shape.fill.kind === "picture" || shape.chart !== void 0 || shape.editable;
 }
 function shapeBox(shape) {
   return {
@@ -3422,6 +3816,7 @@ function finishShapeGesture(event) {
     render();
     return;
   }
+  rememberHistory();
   if (gesture.kind === "crop" && live.crop !== void 0) {
     doc.setPictureCrop(page.slideIndex, gesture.id, live.crop);
   } else {
@@ -3490,13 +3885,15 @@ function clamp(value, min, max) {
 }
 function syncHandles(shape) {
   if (handles === null) return;
-  if (shape === void 0 || shape.fill.kind !== "picture" || page.editing) {
+  if (shape === void 0 || !hasFrameHandles(shape) || page.editing) {
     handles.hidden = true;
     return;
   }
   const box = shapeBox(shape);
   handles.hidden = false;
-  handles.classList.toggle("cropping", page.cropping);
+  const picture = shape.fill.kind === "picture";
+  handles.classList.toggle("cropping", page.cropping && picture);
+  if (cropButton !== null) cropButton.hidden = !picture;
   handles.style.left = `${box.x * page.zoom}px`;
   handles.style.top = `${box.y * page.zoom}px`;
   handles.style.width = `${box.width * page.zoom}px`;
@@ -3505,7 +3902,7 @@ function syncHandles(shape) {
 }
 function openShapeMenu(shape, clientX, clientY) {
   if (shapeMenu === null) return;
-  if (copyShapeButton !== null) copyShapeButton.hidden = shape.fill.kind !== "picture";
+  if (copyShapeButton !== null) copyShapeButton.hidden = !canCopy(shape);
   shapeMenu.hidden = false;
   const width = shapeMenu.offsetWidth;
   const height = shapeMenu.offsetHeight;
@@ -3520,6 +3917,7 @@ function deleteSelectedShape() {
   const doc = page.doc;
   const shape = selected();
   if (doc === null || shape === void 0 || !canMove(shape)) return;
+  rememberHistory();
   doc.deleteShape(page.slideIndex, shape.id);
   page.selectedId = void 0;
   page.editing = false;
@@ -3530,10 +3928,10 @@ function deleteSelectedShape() {
 }
 function copySelectedPicture() {
   const shape = selected();
-  if (shape === void 0 || shape.fill.kind !== "picture") return false;
+  if (shape === void 0 || !canCopy(shape)) return false;
   page.clip = { slide: page.slideIndex, id: shape.id };
   page.pasteCount = 0;
-  const bitmap = page.images.get(shape.fill.imagePath);
+  const bitmap = shape.fill.kind === "picture" ? page.images.get(shape.fill.imagePath) : void 0;
   if (bitmap !== void 0 && navigator.clipboard !== void 0) {
     const board = document.createElement("canvas");
     board.width = bitmap.width;
@@ -3553,9 +3951,12 @@ function pastePicture() {
   if (doc === null || clip === null) return;
   page.pasteCount += 1;
   const offset = page.pasteCount * 12 * EMU_PER_PIXEL;
+  rememberHistory();
   try {
     page.selectedId = doc.duplicateShape(clip.slide, clip.id, page.slideIndex, offset, offset);
   } catch (error) {
+    history.pop();
+    page.pasteCount -= 1;
     note(error instanceof Error ? error.message : "\u65E0\u6CD5\u7C98\u8D34");
     return;
   }
@@ -3564,6 +3965,34 @@ function pastePicture() {
   page.cropping = false;
   markDirty();
   render();
+}
+var textInk = /* @__PURE__ */ new Map();
+function rememberTextInk(scene) {
+  textInk.clear();
+  const ctx = context;
+  if (ctx === null || ctx === void 0) return;
+  for (const shape of scene.shapes) {
+    const text = shape.text;
+    if (text === void 0 || text.clip) continue;
+    const width = shape.width / EMU_PER_PIXEL;
+    const height = shape.height / EMU_PER_PIXEL;
+    const y = shape.y / EMU_PER_PIXEL;
+    const padTop = text.padding.top / EMU_PER_PIXEL;
+    const padBottom = text.padding.bottom / EMU_PER_PIXEL;
+    const innerWidth = Math.max(
+      1,
+      width - text.padding.left / EMU_PER_PIXEL - text.padding.right / EMU_PER_PIXEL
+    );
+    const innerHeight = Math.max(0, height - padTop - padBottom);
+    const contentHeight = text.paragraphs.reduce(
+      (sum, paragraph) => sum + layoutParagraph(ctx, paragraph, innerWidth).height,
+      0
+    );
+    let top = y + padTop;
+    if (text.anchor === "ctr") top += Math.max(0, (innerHeight - contentHeight) / 2);
+    if (text.anchor === "b") top += Math.max(0, innerHeight - contentHeight);
+    textInk.set(shape.id, { top, bottom: top + contentHeight });
+  }
 }
 function hitTest(x, y) {
   const shapes = page.doc?.scene(page.slideIndex).shapes ?? [];
@@ -3581,14 +4010,18 @@ function hits(shape, px, py) {
   const y = shape.y / EMU_PER_PIXEL;
   const width = shape.width / EMU_PER_PIXEL;
   const height = shape.height / EMU_PER_PIXEL;
+  const ink = textInk.get(shape.id);
+  const top = ink === void 0 ? y : Math.min(y, ink.top);
+  const bottom = ink === void 0 ? y + height : Math.max(y + height, ink.bottom);
+  const centerY = y + height / 2;
   const dx = px - (x + width / 2);
-  const dy = py - (y + height / 2);
+  const dy = py - centerY;
   const rad = shape.rotation * Math.PI / 180;
   const cos = Math.cos(rad);
   const sin = Math.sin(rad);
   const localX = dx * cos + dy * sin;
   const localY = -dx * sin + dy * cos;
-  return Math.abs(localX) <= width / 2 && Math.abs(localY) <= height / 2;
+  return Math.abs(localX) <= width / 2 && localY >= top - centerY && localY <= bottom - centerY;
 }
 async function loadImages() {
   const doc = page.doc;
@@ -3640,6 +4073,7 @@ function render() {
   );
   const shape = selected();
   const shown = shape === void 0 ? void 0 : shownShape(shape);
+  rememberTextInk(scene);
   if (shown !== void 0 && shown.selectable) strokeSelection(context, shown);
   syncHandles(shown);
   syncEditor(page.editing ? shape : void 0);
@@ -3848,6 +4282,11 @@ function drawShape(ctx, shape, omitTextId) {
     ctx.restore();
     return;
   }
+  if (drawn.chart !== void 0) {
+    drawChart(ctx, drawn, x, y, width, height);
+    ctx.restore();
+    return;
+  }
   if (drawn.shadow !== void 0) {
     ctx.shadowColor = drawn.shadow.color;
     ctx.shadowBlur = drawn.shadow.blur / EMU_PER_PIXEL;
@@ -4006,6 +4445,82 @@ function drawBitmap(ctx, bitmap, crop, x, y, width, height) {
   if (sw <= 0 || sh <= 0) return;
   ctx.drawImage(bitmap, sx, sy, sw, sh, x, y, width, height);
 }
+function drawChart(ctx, shape, x, y, width, height) {
+  const chart = shape.chart;
+  if (chart === void 0) return;
+  const titleSize = 16;
+  const titleHeight = chart.title.length > 0 ? titleSize + 10 : 0;
+  ctx.fillStyle = "#12283d";
+  ctx.font = `700 ${titleSize}px "Microsoft YaHei", "Segoe UI", sans-serif`;
+  ctx.textAlign = "center";
+  ctx.textBaseline = "top";
+  if (chart.title.length > 0) ctx.fillText(chart.title, x + width / 2, y + 2);
+  const legend = chart.legend ? layoutLegend(ctx, chart.points, width) : { height: 0, rows: [] };
+  const plotTop = y + titleHeight;
+  const plotHeight = Math.max(1, height - titleHeight - legend.height - 8);
+  const outer = Math.max(1, Math.min(width, plotHeight) / 2 - 8);
+  const inner = outer * chart.hole;
+  const cx = x + width / 2;
+  const cy = plotTop + plotHeight / 2;
+  const total = chart.points.reduce((sum, point) => sum + point.value, 0);
+  if (total <= 0) return;
+  let angle = -Math.PI / 2 + chart.start * Math.PI / 180;
+  for (const point of chart.points) {
+    const sweep = point.value / total * Math.PI * 2;
+    ctx.beginPath();
+    if (inner <= 1) {
+      ctx.moveTo(cx, cy);
+      ctx.arc(cx, cy, outer, angle, angle + sweep);
+    } else {
+      ctx.arc(cx, cy, outer, angle, angle + sweep);
+      ctx.arc(cx, cy, inner, angle + sweep, angle, true);
+    }
+    ctx.closePath();
+    ctx.fillStyle = point.color;
+    ctx.fill();
+    ctx.strokeStyle = "#ffffff";
+    ctx.lineWidth = 2;
+    ctx.stroke();
+    angle += sweep;
+  }
+  if (legend.height > 0) drawLegend(ctx, legend, chart.points, x, y + height - legend.height, width);
+  ctx.textAlign = "left";
+}
+function layoutLegend(ctx, points, width) {
+  ctx.font = '13px "Microsoft YaHei", "Segoe UI", sans-serif';
+  const rows = [];
+  let row = { items: [], width: 0 };
+  points.forEach((point, index) => {
+    const itemWidth = 14 + ctx.measureText(point.label).width + 16;
+    if (row.items.length > 0 && row.width + itemWidth > width) {
+      rows.push(row);
+      row = { items: [], width: 0 };
+    }
+    row.items.push(index);
+    row.width += itemWidth;
+  });
+  if (row.items.length > 0) rows.push(row);
+  return { height: rows.length * 20 + 8, rows };
+}
+function drawLegend(ctx, legend, points, x, y, width) {
+  ctx.font = '13px "Microsoft YaHei", "Segoe UI", sans-serif';
+  ctx.textAlign = "left";
+  ctx.textBaseline = "middle";
+  ctx.fillStyle = "#5b6b7c";
+  legend.rows.forEach((row, rowIndex) => {
+    let cursor = x + Math.max(0, (width - row.width) / 2);
+    const top = y + rowIndex * 20 + 10;
+    for (const index of row.items) {
+      const point = points[index];
+      if (point === void 0) continue;
+      ctx.fillStyle = point.color;
+      ctx.fillRect(cursor, top - 5, 10, 10);
+      ctx.fillStyle = "#5b6b7c";
+      ctx.fillText(point.label, cursor + 14, top);
+      cursor += 14 + ctx.measureText(point.label).width + 16;
+    }
+  });
+}
 function drawText(ctx, shape, x, y, width, height) {
   const text = shape.text;
   if (text === void 0) return;
@@ -4018,8 +4533,10 @@ function drawText(ctx, shape, x, y, width, height) {
   const innerWidth = Math.max(1, width - pad.left - pad.right);
   const innerHeight = Math.max(0, height - pad.top - pad.bottom);
   ctx.save();
-  trace(ctx, shape, x, y, width, height);
-  ctx.clip();
+  if (text.clip) {
+    trace(ctx, shape, x, y, width, height);
+    ctx.clip();
+  }
   const laid = text.paragraphs.map((paragraph) => layoutParagraph(ctx, paragraph, innerWidth));
   const contentHeight = laid.reduce((sum, paragraph) => sum + paragraph.height, 0);
   let cursor = y + pad.top;

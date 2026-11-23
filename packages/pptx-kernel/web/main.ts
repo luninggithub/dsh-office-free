@@ -5,6 +5,7 @@ import {
   type PaintParagraph,
   type PaintRun,
   type PaintShape,
+  type PptxCheckpoint,
   type PptxDocument,
   type SlideScene
 } from '../src/index.ts'
@@ -75,7 +76,9 @@ interface ShapeGesture {
 
 let pressing = false
 let painting = false
+let applyingHistory = false
 let plainOpen = readPlainOpen()
+const history: PptxCheckpoint[] = []
 let menuIndex = -1
 let drag: ThumbDrag | null = null
 let shapeGesture: ShapeGesture | null = null
@@ -88,7 +91,9 @@ interface ThumbDrag {
 }
 
 const openButton = document.querySelector<HTMLButtonElement>('#open')
+const insertImageButton = document.querySelector<HTMLButtonElement>('#insert-image')
 const fileInput = document.querySelector<HTMLInputElement>('#file')
+const imageInput = document.querySelector<HTMLInputElement>('#image-file')
 const fileName = document.querySelector<HTMLSpanElement>('#file-name')
 const saveButton = document.querySelector<HTMLButtonElement>('#save')
 const discardButton = document.querySelector<HTMLButtonElement>('#discard')
@@ -119,10 +124,20 @@ openButton?.addEventListener('click', () => {
   if (plainOpen || filePicker() === undefined || embeddedFrame()) choosePlainFile()
   else void pickFile()
 })
+insertImageButton?.addEventListener('click', () => {
+  if (imageInput === null) return
+  imageInput.value = ''
+  imageInput.click()
+})
 fileInput?.addEventListener('change', () => {
   const file = fileInput.files?.[0]
   fileInput.value = ''
   if (file !== undefined) void openFile(file)
+})
+imageInput?.addEventListener('change', () => {
+  const file = imageInput.files?.[0]
+  imageInput.value = ''
+  if (file !== undefined) void insertLocalImage(file)
 })
 saveButton?.addEventListener('click', () => {
   void saveCurrent()
@@ -158,17 +173,25 @@ window.addEventListener('keydown', (event) => {
     }
     return
   }
+  const command = event.ctrlKey || event.metaKey
+  const key = event.key.toLowerCase()
+  if (command && key === 'z' && !event.shiftKey && !fieldTarget()) {
+    event.preventDefault()
+    undo()
+    return
+  }
   if (typingTarget()) return
   if (event.key === 'Delete' || event.key === 'Backspace') {
     event.preventDefault()
     deleteSelectedShape()
     return
   }
-  if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'c') {
+  if (command && key === 'c') {
     if (copySelectedPicture()) event.preventDefault()
     return
   }
-  if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'v') {
+  if (command && key === 'v') {
+    if (page.clip === null) return
     event.preventDefault()
     pastePicture()
   }
@@ -267,6 +290,7 @@ sheet?.addEventListener('pointerdown', (event) => {
   if (sameText) return
   // Keep the pointer from moving focus. A blur while the pointer is down hides the editor and drops the click.
   event.preventDefault()
+  focusSheet()
   const previous = page.selectedId
   const content = shape !== undefined && isContent(shape)
   page.pageSelected = !content
@@ -329,12 +353,12 @@ handles?.addEventListener('pointerdown', (event) => {
     event.target instanceof Element ? event.target.closest<HTMLElement>('[data-handle]') : null
   if (handle === null) return
   const shape = selected()
-  if (shape === undefined || shape.fill.kind !== 'picture') return
+  if (shape === undefined || !hasFrameHandles(shape)) return
   event.preventDefault()
   event.stopPropagation()
   const shown = shownShape(shape)
   shapeGesture = {
-    kind: page.cropping ? 'crop' : 'resize',
+    kind: page.cropping && shape.fill.kind === 'picture' ? 'crop' : 'resize',
     id: shape.id,
     pointerId: event.pointerId,
     startClientX: event.clientX,
@@ -376,7 +400,15 @@ canvas?.addEventListener('mousemove', (event) => {
     canvas.style.cursor = 'move'
     return
   }
-  canvas.style.cursor = shape?.editable === true ? 'text' : 'default'
+  canvas.style.cursor =
+    shape !== undefined &&
+    canMove(shape) &&
+    !page.editing &&
+    (shape.chart !== undefined || shape.id === selectedShape?.id)
+      ? 'move'
+      : shape?.editable === true
+        ? 'text'
+        : 'default'
 })
 editor?.addEventListener('input', (event) => {
   if (event.isComposing) return
@@ -563,6 +595,74 @@ async function openFile(file: File): Promise<void> {
   await openBytes(new Uint8Array(await file.arrayBuffer()), file.name)
 }
 
+async function insertLocalImage(file: File): Promise<void> {
+  const doc = page.doc
+  if (doc === null) return
+  const extension = imageExtension(file.name)
+  if (extension === undefined) {
+    note('只支持 PNG、JPEG、GIF 和 WebP')
+    return
+  }
+  let recorded = false
+  try {
+    const bytes = new Uint8Array(await file.arrayBuffer())
+    const bitmap = await createImageBitmap(new Blob([toBuffer(bytes)]))
+    const size = doc.slideSize()
+    const frame = fittedPicture(size.width, size.height, bitmap.width, bitmap.height)
+    rememberHistory()
+    recorded = true
+    const id = doc.insertPicture(page.slideIndex, { bytes, extension }, frame)
+    const shape = doc.scene(page.slideIndex).shapes.find((item) => item.id === id)
+    if (shape?.fill.kind === 'picture') page.images.set(shape.fill.imagePath, bitmap)
+    else bitmap.close()
+    page.selectedId = id
+    page.pageSelected = false
+    page.editing = false
+    page.cropping = false
+    markDirty()
+    focusSheet()
+    render()
+  } catch (error) {
+    if (recorded) history.pop()
+    note(error instanceof Error ? error.message : '无法插入图片')
+  }
+}
+
+function imageExtension(name: string): string | undefined {
+  const extension = /\.([a-z0-9]+)$/i.exec(name)?.[1]?.toLowerCase()
+  if (
+    extension === 'png' ||
+    extension === 'jpg' ||
+    extension === 'jpeg' ||
+    extension === 'gif' ||
+    extension === 'webp'
+  ) {
+    return extension
+  }
+  return undefined
+}
+
+function fittedPicture(
+  slideWidth: number,
+  slideHeight: number,
+  pixelWidth: number,
+  pixelHeight: number
+): { x: number; y: number; width: number; height: number } {
+  const maxWidth = slideWidth * 0.45
+  const maxHeight = slideHeight * 0.45
+  let width = Math.max(1, pixelWidth) * EMU_PER_PIXEL
+  let height = Math.max(1, pixelHeight) * EMU_PER_PIXEL
+  const scale = Math.min(1, maxWidth / width, maxHeight / height)
+  width = Math.max(1, Math.round(width * scale))
+  height = Math.max(1, Math.round(height * scale))
+  return {
+    x: Math.max(0, Math.round((slideWidth - width) / 2)),
+    y: Math.max(0, Math.round((slideHeight - height) / 2)),
+    width,
+    height
+  }
+}
+
 async function openBytes(bytes: Uint8Array, label: string): Promise<void> {
   const saved = bytes.slice()
   try {
@@ -571,8 +671,10 @@ async function openBytes(bytes: Uint8Array, label: string): Promise<void> {
     page.doc = null
     page.saved = null
     clearDirty()
+    history.length = 0
     if (saveButton !== null) saveButton.disabled = true
     if (addButton !== null) addButton.disabled = true
+    if (insertImageButton !== null) insertImageButton.disabled = true
     note(error instanceof Error ? error.message : '无法打开这个文件')
     render()
     return
@@ -590,9 +692,11 @@ async function openBytes(bytes: Uint8Array, label: string): Promise<void> {
   page.clip = null
   setZoom(1, false)
   page.images.clear()
+  history.length = 0
   clearDirty()
   if (saveButton !== null) saveButton.disabled = false
   if (addButton !== null) addButton.disabled = false
+  if (insertImageButton !== null) insertImageButton.disabled = false
   note(label)
   await loadImages()
   render()
@@ -613,6 +717,7 @@ async function saveCurrent(): Promise<void> {
     page.selectedId = selectedId
     page.editing = false
     page.editorShape = undefined
+    history.length = 0
     clearDirty()
     note(page.label.length > 0 ? page.label : '已保存')
     await loadImages()
@@ -656,6 +761,7 @@ async function discardEdits(): Promise<void> {
   page.editorShape = undefined
   page.thumbIndex = -1
   page.images.clear()
+  history.length = 0
   clearDirty()
   note(page.label)
   await loadImages()
@@ -665,6 +771,7 @@ async function discardEdits(): Promise<void> {
 function addSlide(): void {
   const doc = page.doc
   if (doc === null) return
+  rememberHistory()
   page.slideIndex = doc.addSlide(page.slideIndex)
   finishStructureChange()
 }
@@ -672,6 +779,7 @@ function addSlide(): void {
 function duplicateAt(index: number): void {
   const doc = page.doc
   if (doc === null || doc.slides()[index] === undefined) return
+  rememberHistory()
   page.slideIndex = doc.duplicateSlide(index)
   finishStructureChange()
   void loadImages()
@@ -680,6 +788,7 @@ function duplicateAt(index: number): void {
 function deleteAt(index: number): void {
   const doc = page.doc
   if (doc === null || doc.slides().length <= 1 || doc.slides()[index] === undefined) return
+  rememberHistory()
   doc.deleteSlide(index)
   page.slideIndex = Math.min(index, doc.slides().length - 1)
   finishStructureChange()
@@ -768,12 +877,15 @@ function commitEditor(): void {
   const shape = selected()
   if (doc === null || shape === undefined || !shape.editable) return
   const grid = readEditorGrid(editor)
+  const plain = editorPlain(editor)
+  if (sameEditorText(shape, grid, plain)) return
   const offset = grid === undefined ? caretOffset(editor) : 0
+  rememberHistory()
   try {
-    if (grid === undefined)
-      doc.setShapeText(page.slideIndex, shape.id, (editor.textContent ?? '').replace(/\r\n/g, '\n'))
+    if (grid === undefined) doc.setShapeText(page.slideIndex, shape.id, plain)
     else doc.setShapeRuns(page.slideIndex, shape.id, grid)
   } catch (error) {
+    history.pop()
     note(error instanceof Error ? error.message : '无法修改文字')
     return
   }
@@ -790,12 +902,15 @@ function placeEditor(shape: PaintShape): void {
   if (editorFrame === null || editor === null) return
   const scale = page.scale
   const text = shape.text
-  const run = text?.paragraphs[0]?.runs[0]
   const paragraph = text?.paragraphs[0]
   editorFrame.style.left = `${(shape.x / EMU_PER_PIXEL) * scale}px`
   editorFrame.style.top = `${(shape.y / EMU_PER_PIXEL) * scale}px`
   editorFrame.style.width = `${(shape.width / EMU_PER_PIXEL) * scale}px`
-  editorFrame.style.height = `${(shape.height / EMU_PER_PIXEL) * scale}px`
+  const overflowing = text?.clip === false
+  editorFrame.classList.toggle('overflowing', overflowing)
+  editorFrame.style.overflow = overflowing ? 'visible' : 'hidden'
+  editorFrame.style.height = overflowing ? 'auto' : `${(shape.height / EMU_PER_PIXEL) * scale}px`
+  editorFrame.style.minHeight = overflowing ? `${(shape.height / EMU_PER_PIXEL) * scale}px` : ''
   editorFrame.style.transform = `rotate(${shape.rotation}deg)`
   const pad = text?.padding
   editorFrame.style.padding =
@@ -813,9 +928,7 @@ function placeEditor(shape: PaintShape): void {
   editor.style.textDecoration = ''
   editor.style.textAlign =
     paragraph?.align === 'ctr' ? 'center' : paragraph?.align === 'r' ? 'right' : 'left'
-  const line =
-    paragraph === undefined ? (((run?.fontSize ?? 18) * 96) / 72) * 1.2 : lineBox(run, paragraph)
-  editor.style.lineHeight = `${line * scale}px`
+  editor.style.lineHeight = 'normal'
 }
 
 function paintEditor(shape: PaintShape): void {
@@ -828,18 +941,28 @@ function paintEditor(shape: PaintShape): void {
 function paintGrid(shape: PaintShape, grid: readonly (readonly string[])[]): void {
   if (editor === null) return
   const paragraphs = shape.text?.paragraphs ?? []
-  const nodes: Node[] = []
+  const scale = page.scale
+  const nodes: HTMLDivElement[] = []
   painting = true
   paragraphs.forEach((paragraph, paragraphIndex) => {
-    if (paragraphIndex > 0) nodes.push(document.createTextNode('\n'))
+    const block = document.createElement('div')
+    block.dataset.p = String(paragraphIndex)
+    const box = paragraph.runs.reduce((max, run) => Math.max(max, lineBox(run, paragraph)), 0)
+    block.style.marginTop = `${((paragraph.spaceBefore * 96) / 72) * scale}px`
+    block.style.marginBottom = `${((paragraph.spaceAfter * 96) / 72) * scale}px`
+    block.style.lineHeight = `${(box || 1) * scale}px`
+    block.style.textAlign =
+      paragraph.align === 'ctr' ? 'center' : paragraph.align === 'r' ? 'right' : 'left'
+    block.style.whiteSpace = 'pre-wrap'
     paragraph.runs.forEach((run, runIndex) => {
       const span = document.createElement('span')
       span.dataset.p = String(paragraphIndex)
       span.dataset.r = String(runIndex)
       styleRun(span, run)
       span.textContent = grid[paragraphIndex]?.[runIndex] ?? run.text
-      nodes.push(span)
+      block.append(span)
     })
+    nodes.push(block)
   })
   editor.replaceChildren(...nodes)
   painting = false
@@ -860,26 +983,59 @@ function readEditorGrid(root: HTMLElement): string[][] | undefined {
   const grid: string[][] = []
   for (const node of root.childNodes) {
     if (node.nodeType === Node.TEXT_NODE) {
-      if (node.textContent !== '\n') return undefined
-      continue
+      if ((node.textContent ?? '').length === 0) continue
+      return undefined
     }
-    if (!(node instanceof HTMLSpanElement)) return undefined
+    if (!(node instanceof HTMLDivElement)) return undefined
     const paragraphIndex = Number(node.dataset.p)
-    const runIndex = Number(node.dataset.r)
-    if (!Number.isInteger(paragraphIndex) || !Number.isInteger(runIndex)) return undefined
-    const row = grid[paragraphIndex] ?? []
-    if (row[runIndex] !== undefined) return undefined
-    row[runIndex] = node.textContent ?? ''
-    grid[paragraphIndex] = row
-  }
-  for (let index = 0; index < grid.length; index += 1) {
-    const row = grid[index]
-    if (row === undefined) return undefined
+    if (!Number.isInteger(paragraphIndex) || grid[paragraphIndex] !== undefined) return undefined
+    const row: string[] = []
+    for (const child of node.childNodes) {
+      if (child.nodeType === Node.TEXT_NODE) {
+        if ((child.textContent ?? '').length === 0) continue
+        return undefined
+      }
+      if (!(child instanceof HTMLSpanElement)) return undefined
+      const runIndex = Number(child.dataset.r)
+      if (!Number.isInteger(runIndex) || row[runIndex] !== undefined) return undefined
+      row[runIndex] = child.textContent ?? ''
+    }
+    if (row.length === 0) row.push(node.textContent ?? '')
     for (let run = 0; run < row.length; run += 1) {
       if (row[run] === undefined) return undefined
     }
+    grid[paragraphIndex] = row
+  }
+  for (let index = 0; index < grid.length; index += 1) {
+    if (grid[index] === undefined) return undefined
   }
   return grid
+}
+
+function editorPlain(root: HTMLElement): string {
+  const blocks = [...root.children].filter(
+    (node): node is HTMLElement => node instanceof HTMLElement
+  )
+  if (blocks.length === 0) return (root.textContent ?? '').replace(/\r\n/g, '\n')
+  return blocks.map((block) => block.textContent ?? '').join('\n')
+}
+
+function sameEditorText(
+  shape: PaintShape,
+  grid: string[][] | undefined,
+  plain: string
+): boolean {
+  if (grid === undefined) return plain === shape.plain
+  const paragraphs = shape.text?.paragraphs ?? []
+  if (grid.length !== paragraphs.length) return false
+  return paragraphs.every((paragraph, index) => {
+    const row = grid[index]
+    return (
+      row !== undefined &&
+      row.length === paragraph.runs.length &&
+      paragraph.runs.every((run, runIndex) => run.text === row[runIndex])
+    )
+  })
 }
 
 function caretOffset(root: HTMLElement): number {
@@ -987,6 +1143,47 @@ function typingTarget(): boolean {
   return node === editor || node instanceof HTMLInputElement || node instanceof HTMLTextAreaElement
 }
 
+function fieldTarget(): boolean {
+  const node = document.activeElement
+  return node instanceof HTMLInputElement || node instanceof HTMLTextAreaElement
+}
+
+function focusSheet(): void {
+  sheet?.focus({ preventScroll: true })
+}
+
+function rememberHistory(): void {
+  if (page.doc === null || applyingHistory) return
+  history.push(page.doc.capture())
+  if (history.length > 50) history.shift()
+}
+
+function undo(): void {
+  const doc = page.doc
+  const checkpoint = history.pop()
+  if (doc === null || checkpoint === undefined) return
+  applyingHistory = true
+  try {
+    doc.restore(checkpoint)
+    if (checkpoint.dirty) markDirty()
+    else clearDirty()
+    const current = doc.scene(page.slideIndex).shapes.find((shape) => shape.id === page.selectedId)
+    if (current === undefined) {
+      page.selectedId = undefined
+      page.editing = false
+    }
+    page.cropping = false
+    page.live = undefined
+    page.editorShape = undefined
+    page.images.clear()
+  } finally {
+    applyingHistory = false
+  }
+  void loadImages().then(() => {
+    render()
+  })
+}
+
 const THUMB_MIN = 96
 const STAGE_MIN = 160
 
@@ -1008,11 +1205,25 @@ function setZoom(next: number, paint = true): void {
 }
 
 function canMove(shape: PaintShape): boolean {
-  return shape.selectable && (shape.fill.kind === 'picture' || shape.editable)
+  return (
+    shape.selectable &&
+    (shape.fill.kind === 'picture' || shape.editable || shape.chart !== undefined)
+  )
 }
 
 function isContent(shape: PaintShape): boolean {
-  return canMove(shape) && (shape.fill.kind === 'picture' || shape.plain.length > 0)
+  return (
+    canMove(shape) &&
+    (shape.fill.kind === 'picture' || shape.plain.length > 0 || shape.chart !== undefined)
+  )
+}
+
+function hasFrameHandles(shape: PaintShape): boolean {
+  return shape.fill.kind === 'picture' || shape.chart !== undefined
+}
+
+function canCopy(shape: PaintShape): boolean {
+  return shape.fill.kind === 'picture' || shape.chart !== undefined || shape.editable
 }
 
 function shapeBox(shape: PaintShape): Box {
@@ -1100,6 +1311,7 @@ function finishShapeGesture(event: PointerEvent): void {
     render()
     return
   }
+  rememberHistory()
   if (gesture.kind === 'crop' && live.crop !== undefined) {
     doc.setPictureCrop(page.slideIndex, gesture.id, live.crop)
   } else {
@@ -1179,13 +1391,15 @@ function clamp(value: number, min: number, max: number): number {
 
 function syncHandles(shape: PaintShape | undefined): void {
   if (handles === null) return
-  if (shape === undefined || shape.fill.kind !== 'picture' || page.editing) {
+  if (shape === undefined || !hasFrameHandles(shape) || page.editing) {
     handles.hidden = true
     return
   }
   const box = shapeBox(shape)
   handles.hidden = false
-  handles.classList.toggle('cropping', page.cropping)
+  const picture = shape.fill.kind === 'picture'
+  handles.classList.toggle('cropping', page.cropping && picture)
+  if (cropButton !== null) cropButton.hidden = !picture
   handles.style.left = `${box.x * page.zoom}px`
   handles.style.top = `${box.y * page.zoom}px`
   handles.style.width = `${box.width * page.zoom}px`
@@ -1195,7 +1409,7 @@ function syncHandles(shape: PaintShape | undefined): void {
 
 function openShapeMenu(shape: PaintShape, clientX: number, clientY: number): void {
   if (shapeMenu === null) return
-  if (copyShapeButton !== null) copyShapeButton.hidden = shape.fill.kind !== 'picture'
+  if (copyShapeButton !== null) copyShapeButton.hidden = !canCopy(shape)
   shapeMenu.hidden = false
   const width = shapeMenu.offsetWidth
   const height = shapeMenu.offsetHeight
@@ -1212,6 +1426,7 @@ function deleteSelectedShape(): void {
   const doc = page.doc
   const shape = selected()
   if (doc === null || shape === undefined || !canMove(shape)) return
+  rememberHistory()
   doc.deleteShape(page.slideIndex, shape.id)
   page.selectedId = undefined
   page.editing = false
@@ -1223,10 +1438,10 @@ function deleteSelectedShape(): void {
 
 function copySelectedPicture(): boolean {
   const shape = selected()
-  if (shape === undefined || shape.fill.kind !== 'picture') return false
+  if (shape === undefined || !canCopy(shape)) return false
   page.clip = { slide: page.slideIndex, id: shape.id }
   page.pasteCount = 0
-  const bitmap = page.images.get(shape.fill.imagePath)
+  const bitmap = shape.fill.kind === 'picture' ? page.images.get(shape.fill.imagePath) : undefined
   if (bitmap !== undefined && navigator.clipboard !== undefined) {
     const board = document.createElement('canvas')
     board.width = bitmap.width
@@ -1248,9 +1463,12 @@ function pastePicture(): void {
   if (doc === null || clip === null) return
   page.pasteCount += 1
   const offset = page.pasteCount * 12 * EMU_PER_PIXEL
+  rememberHistory()
   try {
     page.selectedId = doc.duplicateShape(clip.slide, clip.id, page.slideIndex, offset, offset)
   } catch (error) {
+    history.pop()
+    page.pasteCount -= 1
     note(error instanceof Error ? error.message : '无法粘贴')
     return
   }
@@ -1259,6 +1477,36 @@ function pastePicture(): void {
   page.cropping = false
   markDirty()
   render()
+}
+
+const textInk = new Map<string, { top: number; bottom: number }>()
+
+function rememberTextInk(scene: SlideScene): void {
+  textInk.clear()
+  const ctx = context
+  if (ctx === null || ctx === undefined) return
+  for (const shape of scene.shapes) {
+    const text = shape.text
+    if (text === undefined || text.clip) continue
+    const width = shape.width / EMU_PER_PIXEL
+    const height = shape.height / EMU_PER_PIXEL
+    const y = shape.y / EMU_PER_PIXEL
+    const padTop = text.padding.top / EMU_PER_PIXEL
+    const padBottom = text.padding.bottom / EMU_PER_PIXEL
+    const innerWidth = Math.max(
+      1,
+      width - text.padding.left / EMU_PER_PIXEL - text.padding.right / EMU_PER_PIXEL
+    )
+    const innerHeight = Math.max(0, height - padTop - padBottom)
+    const contentHeight = text.paragraphs.reduce(
+      (sum, paragraph) => sum + layoutParagraph(ctx, paragraph, innerWidth).height,
+      0
+    )
+    let top = y + padTop
+    if (text.anchor === 'ctr') top += Math.max(0, (innerHeight - contentHeight) / 2)
+    if (text.anchor === 'b') top += Math.max(0, innerHeight - contentHeight)
+    textInk.set(shape.id, { top, bottom: top + contentHeight })
+  }
 }
 
 function hitTest(x: number, y: number): PaintShape | undefined {
@@ -1278,14 +1526,18 @@ function hits(shape: PaintShape, px: number, py: number): boolean {
   const y = shape.y / EMU_PER_PIXEL
   const width = shape.width / EMU_PER_PIXEL
   const height = shape.height / EMU_PER_PIXEL
+  const ink = textInk.get(shape.id)
+  const top = ink === undefined ? y : Math.min(y, ink.top)
+  const bottom = ink === undefined ? y + height : Math.max(y + height, ink.bottom)
+  const centerY = y + height / 2
   const dx = px - (x + width / 2)
-  const dy = py - (y + height / 2)
+  const dy = py - centerY
   const rad = (shape.rotation * Math.PI) / 180
   const cos = Math.cos(rad)
   const sin = Math.sin(rad)
   const localX = dx * cos + dy * sin
   const localY = -dx * sin + dy * cos
-  return Math.abs(localX) <= width / 2 && Math.abs(localY) <= height / 2
+  return Math.abs(localX) <= width / 2 && localY >= top - centerY && localY <= bottom - centerY
 }
 
 async function loadImages(): Promise<void> {
@@ -1340,6 +1592,7 @@ function render(): void {
   )
   const shape = selected()
   const shown = shape === undefined ? undefined : shownShape(shape)
+  rememberTextInk(scene)
   if (shown !== undefined && shown.selectable) strokeSelection(context, shown)
   syncHandles(shown)
   syncEditor(page.editing ? shape : undefined)
@@ -1579,6 +1832,11 @@ function drawShape(
     ctx.restore()
     return
   }
+  if (drawn.chart !== undefined) {
+    drawChart(ctx, drawn, x, y, width, height)
+    ctx.restore()
+    return
+  }
   if (drawn.shadow !== undefined) {
     ctx.shadowColor = drawn.shadow.color
     ctx.shadowBlur = drawn.shadow.blur / EMU_PER_PIXEL
@@ -1776,6 +2034,108 @@ function drawBitmap(
   ctx.drawImage(bitmap, sx, sy, sw, sh, x, y, width, height)
 }
 
+function drawChart(
+  ctx: CanvasRenderingContext2D,
+  shape: PaintShape,
+  x: number,
+  y: number,
+  width: number,
+  height: number
+): void {
+  const chart = shape.chart
+  if (chart === undefined) return
+  const titleSize = 16
+  const titleHeight = chart.title.length > 0 ? titleSize + 10 : 0
+  ctx.fillStyle = '#12283d'
+  ctx.font = `700 ${titleSize}px "Microsoft YaHei", "Segoe UI", sans-serif`
+  ctx.textAlign = 'center'
+  ctx.textBaseline = 'top'
+  if (chart.title.length > 0) ctx.fillText(chart.title, x + width / 2, y + 2)
+  const legend = chart.legend ? layoutLegend(ctx, chart.points, width) : { height: 0, rows: [] }
+  const plotTop = y + titleHeight
+  const plotHeight = Math.max(1, height - titleHeight - legend.height - 8)
+  const outer = Math.max(1, Math.min(width, plotHeight) / 2 - 8)
+  const inner = outer * chart.hole
+  const cx = x + width / 2
+  const cy = plotTop + plotHeight / 2
+  const total = chart.points.reduce((sum, point) => sum + point.value, 0)
+  if (total <= 0) return
+  let angle = -Math.PI / 2 + (chart.start * Math.PI) / 180
+  for (const point of chart.points) {
+    const sweep = (point.value / total) * Math.PI * 2
+    ctx.beginPath()
+    if (inner <= 1) {
+      ctx.moveTo(cx, cy)
+      ctx.arc(cx, cy, outer, angle, angle + sweep)
+    } else {
+      ctx.arc(cx, cy, outer, angle, angle + sweep)
+      ctx.arc(cx, cy, inner, angle + sweep, angle, true)
+    }
+    ctx.closePath()
+    ctx.fillStyle = point.color
+    ctx.fill()
+    ctx.strokeStyle = '#ffffff'
+    ctx.lineWidth = 2
+    ctx.stroke()
+    angle += sweep
+  }
+  if (legend.height > 0) drawLegend(ctx, legend, chart.points, x, y + height - legend.height, width)
+  ctx.textAlign = 'left'
+}
+
+interface LegendRow {
+  readonly items: readonly number[]
+  readonly width: number
+}
+
+function layoutLegend(
+  ctx: CanvasRenderingContext2D,
+  points: NonNullable<PaintShape['chart']>['points'],
+  width: number
+): { height: number; rows: LegendRow[] } {
+  ctx.font = '13px "Microsoft YaHei", "Segoe UI", sans-serif'
+  const rows: { items: number[]; width: number }[] = []
+  let row: { items: number[]; width: number } = { items: [], width: 0 }
+  points.forEach((point, index) => {
+    const itemWidth = 14 + ctx.measureText(point.label).width + 16
+    if (row.items.length > 0 && row.width + itemWidth > width) {
+      rows.push(row)
+      row = { items: [], width: 0 }
+    }
+    row.items.push(index)
+    row.width += itemWidth
+  })
+  if (row.items.length > 0) rows.push(row)
+  return { height: rows.length * 20 + 8, rows }
+}
+
+function drawLegend(
+  ctx: CanvasRenderingContext2D,
+  legend: { readonly rows: readonly LegendRow[] },
+  points: NonNullable<PaintShape['chart']>['points'],
+  x: number,
+  y: number,
+  width: number
+): void {
+  ctx.font = '13px "Microsoft YaHei", "Segoe UI", sans-serif'
+  ctx.textAlign = 'left'
+  ctx.textBaseline = 'middle'
+  ctx.fillStyle = '#5b6b7c'
+  legend.rows.forEach((row, rowIndex) => {
+    let cursor = x + Math.max(0, (width - row.width) / 2)
+    const top = y + rowIndex * 20 + 10
+    for (const index of row.items) {
+      const point = points[index]
+      if (point === undefined) continue
+      ctx.fillStyle = point.color
+      ctx.fillRect(cursor, top - 5, 10, 10)
+      ctx.fillStyle = '#5b6b7c'
+      ctx.fillText(point.label, cursor + 14, top)
+      cursor += 14 + ctx.measureText(point.label).width + 16
+    }
+  })
+}
+
 function drawText(
   ctx: CanvasRenderingContext2D,
   shape: PaintShape,
@@ -1795,8 +2155,10 @@ function drawText(
   const innerWidth = Math.max(1, width - pad.left - pad.right)
   const innerHeight = Math.max(0, height - pad.top - pad.bottom)
   ctx.save()
-  trace(ctx, shape, x, y, width, height)
-  ctx.clip()
+  if (text.clip) {
+    trace(ctx, shape, x, y, width, height)
+    ctx.clip()
+  }
   const laid = text.paragraphs.map((paragraph) => layoutParagraph(ctx, paragraph, innerWidth))
   const contentHeight = laid.reduce((sum, paragraph) => sum + paragraph.height, 0)
   let cursor = y + pad.top

@@ -1,5 +1,5 @@
 export { EMU_PER_PIXEL, openPptx, PptxDocument } from './pptx.ts'
-export type { SlidePage, SlideShape, SlideSize } from './pptx.ts'
+export type { PptxCheckpoint, SlidePage, SlideShape, SlideSize } from './pptx.ts'
 export type {
   PaintFill,
   PaintGeometry,

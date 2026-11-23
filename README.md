@@ -8,10 +8,12 @@ A from-scratch browser kernel for opening and editing `.pptx` files. It does not
 
 The page can:
 
-- open a `.pptx` and paint slide backgrounds, theme, master, layout, text, pictures, and tables
+- open a `.pptx` and paint slide backgrounds, theme, master, layout, text, pictures, tables, doughnut charts, and pie charts
 - edit text on the slide and keep each run's font, size, weight, and color
-- move a picture or a text box, and resize or crop a picture
-- copy or delete the selected picture; the crop button's top-left corner sits on that picture's top-right corner
+- move a picture, text box, doughnut chart, or pie chart; resize a picture or either chart; crop a picture
+- copy or delete the selected picture, text box, doughnut chart, or pie chart; the crop button's top-left corner sits on that picture's top-right corner
+- use Ctrl+C, Ctrl+V, and Ctrl+Z to copy, paste, and undo the selected object
+- insert a local PNG, JPEG, GIF, or WebP with **插入图片**, then move, resize, or crop it
 - append a blank slide that reuses the current slide's layout
 - copy a slide, delete a slide, or drag thumbnails to reorder them; the last remaining slide cannot be deleted
 - drag the bar between the thumbnail list and the slide to change both widths
@@ -19,7 +21,7 @@ The page can:
 - scroll the slide horizontally to either edge at any pane width
 - overwrite the open file with **保存**, or restore the last saved bytes with **放弃**
 
-Charts, SmartArt, animations, transitions, equations, and Office line breaking are not implemented. Text wrapping is approximate.
+Charts other than doughnut and pie charts, SmartArt, animations, transitions, equations, and Office line breaking are not implemented. Text wrapping is approximate.
 
 ## Run locally
 
