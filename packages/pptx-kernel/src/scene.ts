@@ -785,6 +785,7 @@ function paintChart(
       : readNumber(holeNode === undefined ? undefined : attribute(holeNode.attrs, 'val'), 50) / 100
   const angleNode = direct(chartXml, plot, 'firstSliceAng')
   const title = findDescendant(chartXml, 'title')
+  const face = chartFace(deck, chartXml, placed.width, placed.height)
   shapes.push({
     id: identity?.id ?? 'chart',
     name: identity?.name ?? '',
@@ -795,10 +796,10 @@ function paintChart(
     rotation: placed.rotation,
     flipH: false,
     flipV: false,
-    geometry: 'rect',
-    corner: 0,
-    fill: NO_FILL,
-    line: undefined,
+    geometry: face.round ? 'round' : 'rect',
+    corner: face.corner,
+    fill: face.fill,
+    line: face.line,
     shadow: undefined,
     text: undefined,
     chart: {
@@ -813,6 +814,34 @@ function paintChart(
     editable: false,
     selectable: walk.mode === 'slide'
   })
+}
+
+/** CSS pixels of a chart area corner when the chart asks for rounded corners. */
+const CHART_CORNER_PX = 10
+
+/** Chart-area fill and outline live on the chart part, outside the plot. */
+function chartFace(
+  deck: Deck,
+  chartXml: string,
+  width: number,
+  height: number
+): { fill: PaintFill; line: PaintLine | undefined; round: boolean; corner: number } {
+  const space = findDescendant(chartXml, 'chartSpace')
+  const props = space === undefined ? undefined : direct(chartXml, space, 'spPr')
+  const fill =
+    props === undefined
+      ? NO_FILL
+      : (containerFill(chartXml, props, deck.ctx, deck, '', new Map(), NO_FILL) ?? NO_FILL)
+  const rounded = space === undefined ? undefined : direct(chartXml, space, 'roundedCorners')
+  const round = rounded !== undefined && attribute(rounded.attrs, 'val') !== '0'
+  const minSide = Math.min(width, height)
+  const corner = round && minSide > 0 ? Math.min(0.25, (CHART_CORNER_PX * 9525) / minSide) : 0
+  return {
+    fill,
+    line: shapeLine(chartXml, props, undefined, deck),
+    round,
+    corner
+  }
 }
 
 function cachedValues(xml: string, parent: XmlElement | undefined): Map<number, string> {

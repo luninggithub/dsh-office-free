@@ -308,6 +308,12 @@ describe('pptx kernel', () => {
     expect(opened.scene(0).shapes.find((shape) => shape.id === '3')?.text?.clip).toBe(true)
     const chart = opened.scene(0).shapes.find((shape) => shape.id === '4')
     expect(chart?.selectable).toBe(true)
+    expect(chart).toMatchObject({
+      geometry: 'round',
+      fill: { kind: 'solid', color: '#e8f1fa' },
+      line: { color: '#d6e5f2', width: 9525, dash: 'solid' }
+    })
+    expect(chart?.corner).toBeGreaterThan(0)
     expect(chart?.chart).toEqual({
       kind: 'doughnut',
       title: '2025 年中国 AI 芯片市场份额',
@@ -412,6 +418,7 @@ function chartSlide(): string {
 function doughnutChart(): string {
   return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <c:chartSpace xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+<c:roundedCorners val="1"/>
 <c:chart>
 <c:title><c:tx><c:rich><a:bodyPr/><a:lstStyle/><a:p><a:r><a:rPr sz="1200"/><a:t>2025 年中国 AI 芯片市场份额</a:t></a:r></a:p></c:rich></c:tx></c:title>
 <c:plotArea><c:doughnutChart>
@@ -427,6 +434,7 @@ function doughnutChart(): string {
 </c:doughnutChart></c:plotArea>
 <c:legend><c:legendPos val="b"/></c:legend>
 </c:chart>
+<c:spPr><a:solidFill><a:srgbClr val="E8F1FA"/></a:solidFill><a:ln w="9525"><a:solidFill><a:srgbClr val="D6E5F2"/></a:solidFill></a:ln></c:spPr>
 </c:chartSpace>`
 }
 

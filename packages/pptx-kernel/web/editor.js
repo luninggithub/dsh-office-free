@@ -948,6 +948,7 @@ function paintChart(deck, xml, element, shapes, walk) {
   const hole = plot.name === "pieChart" ? 0 : readNumber(holeNode === void 0 ? void 0 : attribute(holeNode.attrs, "val"), 50) / 100;
   const angleNode = direct2(chartXml, plot, "firstSliceAng");
   const title = findDescendant(chartXml, "title");
+  const face2 = chartFace(deck, chartXml, placed.width, placed.height);
   shapes.push({
     id: identity?.id ?? "chart",
     name: identity?.name ?? "",
@@ -958,10 +959,10 @@ function paintChart(deck, xml, element, shapes, walk) {
     rotation: placed.rotation,
     flipH: false,
     flipV: false,
-    geometry: "rect",
-    corner: 0,
-    fill: NO_FILL,
-    line: void 0,
+    geometry: face2.round ? "round" : "rect",
+    corner: face2.corner,
+    fill: face2.fill,
+    line: face2.line,
     shadow: void 0,
     text: void 0,
     chart: {
@@ -976,6 +977,22 @@ function paintChart(deck, xml, element, shapes, walk) {
     editable: false,
     selectable: walk.mode === "slide"
   });
+}
+var CHART_CORNER_PX = 10;
+function chartFace(deck, chartXml, width, height) {
+  const space = findDescendant(chartXml, "chartSpace");
+  const props = space === void 0 ? void 0 : direct2(chartXml, space, "spPr");
+  const fill = props === void 0 ? NO_FILL : containerFill(chartXml, props, deck.ctx, deck, "", /* @__PURE__ */ new Map(), NO_FILL) ?? NO_FILL;
+  const rounded = space === void 0 ? void 0 : direct2(chartXml, space, "roundedCorners");
+  const round = rounded !== void 0 && attribute(rounded.attrs, "val") !== "0";
+  const minSide = Math.min(width, height);
+  const corner = round && minSide > 0 ? Math.min(0.25, CHART_CORNER_PX * 9525 / minSide) : 0;
+  return {
+    fill,
+    line: shapeLine(chartXml, props, void 0, deck),
+    round,
+    corner
+  };
 }
 function cachedValues(xml, parent) {
   const values = /* @__PURE__ */ new Map();
@@ -4283,7 +4300,20 @@ function drawShape(ctx, shape, omitTextId) {
     return;
   }
   if (drawn.chart !== void 0) {
+    trace(ctx, drawn, x, y, width, height);
+    if (drawn.fill.kind === "solid" || drawn.fill.kind === "linear" || drawn.fill.kind === "radial") {
+      ctx.fillStyle = paintFillStyle(ctx, drawn.fill, x, y, width, height);
+      ctx.fill();
+    }
     drawChart(ctx, drawn, x, y, width, height);
+    if (drawn.line !== void 0) {
+      ctx.strokeStyle = drawn.line.color;
+      ctx.lineWidth = Math.max(drawn.line.width / EMU_PER_PIXEL, 0.5);
+      setDash(ctx, drawn.line.dash);
+      trace(ctx, drawn, x, y, width, height);
+      ctx.stroke();
+      ctx.setLineDash([]);
+    }
     ctx.restore();
     return;
   }

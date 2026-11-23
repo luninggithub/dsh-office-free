@@ -1833,7 +1833,20 @@ function drawShape(
     return
   }
   if (drawn.chart !== undefined) {
+    trace(ctx, drawn, x, y, width, height)
+    if (drawn.fill.kind === 'solid' || drawn.fill.kind === 'linear' || drawn.fill.kind === 'radial') {
+      ctx.fillStyle = paintFillStyle(ctx, drawn.fill, x, y, width, height)
+      ctx.fill()
+    }
     drawChart(ctx, drawn, x, y, width, height)
+    if (drawn.line !== undefined) {
+      ctx.strokeStyle = drawn.line.color
+      ctx.lineWidth = Math.max(drawn.line.width / EMU_PER_PIXEL, 0.5)
+      setDash(ctx, drawn.line.dash)
+      trace(ctx, drawn, x, y, width, height)
+      ctx.stroke()
+      ctx.setLineDash([])
+    }
     ctx.restore()
     return
   }

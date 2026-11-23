@@ -8,7 +8,7 @@ A from-scratch browser kernel for opening and editing `.pptx` files. It does not
 
 The page can:
 
-- open a `.pptx` and paint slide backgrounds, theme, master, layout, text, pictures, tables, doughnut charts, and pie charts
+- open a `.pptx` and paint slide backgrounds, theme, master, layout, text, pictures, tables, doughnut charts, and pie charts, including a chart area's fill, outline, and rounded corners
 - edit text on the slide and keep each run's font, size, weight, and color
 - move a picture, text box, doughnut chart, or pie chart; resize a picture or either chart; crop a picture
 - copy or delete the selected picture, text box, doughnut chart, or pie chart; the crop button's top-left corner sits on that picture's top-right corner
