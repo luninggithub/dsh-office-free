@@ -93,6 +93,21 @@ export interface PaintParagraph {
   readonly runs: readonly PaintRun[]
 }
 
+export interface PaintChartPoint {
+  readonly label: string
+  readonly value: number
+  readonly color: string
+}
+
+export interface PaintChart {
+  readonly kind: 'doughnut' | 'pie'
+  readonly title: string
+  readonly hole: number
+  readonly start: number
+  readonly legend: boolean
+  readonly points: readonly PaintChartPoint[]
+}
+
 export interface PaintText {
   readonly anchor: 't' | 'ctr' | 'b'
   readonly padding: {
@@ -101,6 +116,8 @@ export interface PaintText {
     readonly right: number
     readonly bottom: number
   }
+  /** False when the text body may draw past the shape, which is the DrawingML default. */
+  readonly clip: boolean
   readonly paragraphs: readonly PaintParagraph[]
 }
 
@@ -122,6 +139,7 @@ export interface PaintShape {
   readonly line: PaintLine | undefined
   readonly shadow: PaintShadow | undefined
   readonly text: PaintText | undefined
+  readonly chart: PaintChart | undefined
   readonly plain: string
   readonly editable: boolean
   readonly selectable: boolean
@@ -172,6 +190,7 @@ interface Deck {
   readonly layoutKinds: ReadonlySet<string>
   readonly hf: HeaderFooter
   readonly slideNumber: number
+  readonly read: Reader
 }
 
 interface Walk {
@@ -264,7 +283,8 @@ export function buildSlideScene(read: Reader, slideIndex: number): SlideScene {
     slideKinds: kindsOf(slideMarkers),
     layoutKinds: kindsOf(layoutMarkers),
     hf: headerFooter(slideXml, layoutXml, masterXml),
-    slideNumber: slideIndex + 1
+    slideNumber: slideIndex + 1,
+    read
   }
   const size = readSlideSize(presentation)
   const shapes: PaintShape[] = []
@@ -532,6 +552,7 @@ function paintTree(
     if (!includeShape(marker, walk.mode, deck)) continue
     if (element.name === 'graphicFrame') {
       paintTable(deck, xml, element, shapes, walk)
+      paintChart(deck, xml, element, shapes, walk)
       continue
     }
     const shape = buildShape(deck, xml, element, marker, walk)
@@ -582,6 +603,7 @@ function buildShape(
     line: visual.line,
     shadow: visual.shadow,
     text,
+    chart: undefined,
     plain: plainOf(text),
     editable: walk.mode === 'slide' && text !== undefined,
     selectable: walk.mode === 'slide'
@@ -719,6 +741,153 @@ function cornerOf(xml: string, geom: XmlElement): number {
   return 16667 / 100000
 }
 
+const CHART_COLORS = ['#0b2545', '#1b7f79', '#c98a3c', '#6e8193', '#c3cfda', '#4f81bd']
+
+function paintChart(
+  deck: Deck,
+  xml: string,
+  element: XmlElement,
+  shapes: PaintShape[],
+  walk: Walk
+): void {
+  const link = findDescendant(xml, 'chart', element.openEnd, element.closeStart)
+  const relationId = link === undefined ? undefined : attribute(link.attrs, 'id', true)
+  const target = relationId === undefined ? undefined : walk.rels.get(relationId)?.target
+  if (target === undefined) return
+  const chartXml = deck.read(resolvePart(walk.partName, target))
+  if (chartXml === undefined) return
+  const plot =
+    findDescendant(chartXml, 'doughnutChart') ?? findDescendant(chartXml, 'pieChart')
+  if (plot === undefined) return
+  const series = direct(chartXml, plot, 'ser')
+  if (series === undefined) return
+  const identity = identityOf(xml, element)
+  const xfrm = shapeXfrm(xml, element) ?? EMPTY_XFRM
+  const placed = place(walk, xfrm.x, xfrm.y, xfrm.width, xfrm.height, xfrm.rotation)
+  const labels = cachedValues(chartXml, direct(chartXml, series, 'cat'))
+  const values = cachedValues(chartXml, direct(chartXml, series, 'val'))
+  const count = Math.max(labels.size, values.size)
+  const points: PaintChartPoint[] = []
+  for (let index = 0; index < count; index += 1) {
+    const value = Number(values.get(index) ?? '')
+    if (!Number.isFinite(value) || value <= 0) continue
+    points.push({
+      label: labels.get(index) ?? '',
+      value,
+      color: sliceColor(deck, chartXml, series, index) ?? CHART_COLORS[index % CHART_COLORS.length] ?? '#0b2545'
+    })
+  }
+  if (points.length === 0) return
+  const holeNode = direct(chartXml, plot, 'holeSize')
+  const hole =
+    plot.name === 'pieChart'
+      ? 0
+      : readNumber(holeNode === undefined ? undefined : attribute(holeNode.attrs, 'val'), 50) / 100
+  const angleNode = direct(chartXml, plot, 'firstSliceAng')
+  const title = findDescendant(chartXml, 'title')
+  const face = chartFace(deck, chartXml, placed.width, placed.height)
+  shapes.push({
+    id: identity?.id ?? 'chart',
+    name: identity?.name ?? '',
+    x: placed.x,
+    y: placed.y,
+    width: placed.width,
+    height: placed.height,
+    rotation: placed.rotation,
+    flipH: false,
+    flipV: false,
+    geometry: face.round ? 'round' : 'rect',
+    corner: face.corner,
+    fill: face.fill,
+    line: face.line,
+    shadow: undefined,
+    text: undefined,
+    chart: {
+      kind: hole > 0 ? 'doughnut' : 'pie',
+      title: title === undefined ? '' : plainText(chartXml, title.openEnd, title.closeStart),
+      hole: Math.min(0.9, Math.max(0, hole)),
+      start: readNumber(angleNode === undefined ? undefined : attribute(angleNode.attrs, 'val')),
+      legend: findDescendant(chartXml, 'legend') !== undefined,
+      points
+    },
+    plain: '',
+    editable: false,
+    selectable: walk.mode === 'slide'
+  })
+}
+
+/** CSS pixels of a chart area corner when the chart asks for rounded corners. */
+const CHART_CORNER_PX = 10
+
+/** Chart-area fill and outline live on the chart part, outside the plot. */
+function chartFace(
+  deck: Deck,
+  chartXml: string,
+  width: number,
+  height: number
+): { fill: PaintFill; line: PaintLine | undefined; round: boolean; corner: number } {
+  const space = findDescendant(chartXml, 'chartSpace')
+  const props = space === undefined ? undefined : direct(chartXml, space, 'spPr')
+  const fill =
+    props === undefined
+      ? NO_FILL
+      : (containerFill(chartXml, props, deck.ctx, deck, '', new Map(), NO_FILL) ?? NO_FILL)
+  const rounded = space === undefined ? undefined : direct(chartXml, space, 'roundedCorners')
+  const round = rounded !== undefined && attribute(rounded.attrs, 'val') !== '0'
+  const minSide = Math.min(width, height)
+  const corner = round && minSide > 0 ? Math.min(0.25, (CHART_CORNER_PX * 9525) / minSide) : 0
+  return {
+    fill,
+    line: shapeLine(chartXml, props, undefined, deck),
+    round,
+    corner
+  }
+}
+
+function cachedValues(xml: string, parent: XmlElement | undefined): Map<number, string> {
+  const values = new Map<number, string>()
+  if (parent === undefined) return values
+  const cache =
+    findDescendant(xml, 'strCache', parent.openEnd, parent.closeStart) ??
+    findDescendant(xml, 'numCache', parent.openEnd, parent.closeStart)
+  if (cache === undefined) return values
+  for (const point of childElements(xml, cache.openEnd, cache.closeStart)) {
+    if (point.name !== 'pt') continue
+    const value = direct(xml, point, 'v')
+    if (value === undefined) continue
+    values.set(
+      readNumber(attribute(point.attrs, 'idx')),
+      decodeXml(xml.slice(value.openEnd, value.closeStart))
+    )
+  }
+  return values
+}
+
+function sliceColor(deck: Deck, xml: string, series: XmlElement, index: number): string | undefined {
+  for (const point of childElements(xml, series.openEnd, series.closeStart)) {
+    if (point.name !== 'dPt') continue
+    const marker = direct(xml, point, 'idx')
+    if (readNumber(marker === undefined ? undefined : attribute(marker.attrs, 'val'), -1) !== index) {
+      continue
+    }
+    const props = direct(xml, point, 'spPr')
+    const fill = props === undefined ? undefined : direct(xml, props, 'solidFill')
+    const color = fill === undefined ? undefined : colorElement(xml, fill)
+    if (color === undefined) return undefined
+    return cssColor(rgbOf(xml, color, deck.ctx))
+  }
+  return undefined
+}
+
+function plainText(xml: string, from: number, to: number): string {
+  let text = ''
+  for (const element of childElements(xml, from, to)) {
+    if (element.name === 't') text += decodeXml(xml.slice(element.openEnd, element.closeStart))
+    else text += plainText(xml, element.openEnd, element.closeStart)
+  }
+  return text
+}
+
 function paintTable(
   deck: Deck,
   xml: string,
@@ -777,6 +946,7 @@ function paintTable(
           line: props === undefined ? undefined : cellLine(xml, props, deck),
           shadow: undefined,
           text,
+          chart: undefined,
           plain: plainOf(text),
           editable: false,
           selectable: false
@@ -809,7 +979,7 @@ function cellText(deck: Deck, xml: string, cell: XmlElement): PaintText | undefi
   const own = direct(xml, body, 'lstStyle')
   const rest = own === undefined ? [] : [{ xml, element: own }]
   const props = direct(xml, cell, 'tcPr')
-  return paragraphs(deck, xml, body, deck.fallback, NO_FONT, rest, paddingOf(props), 1)
+  return paragraphs(deck, xml, body, deck.fallback, NO_FONT, rest, paddingOf(props), 1, 't', true)
 }
 
 function paddingOf(props: XmlElement | undefined): PaintText['padding'] {
@@ -840,7 +1010,8 @@ function paintText(
     styleSpans(deck, xml, element, marker, mode),
     metrics.padding,
     metrics.fontScale,
-    metrics.anchor
+    metrics.anchor,
+    metrics.clip
   )
 }
 
@@ -853,7 +1024,8 @@ function paragraphs(
   rest: readonly Span[],
   padding: PaintText['padding'],
   fontScale: number,
-  anchor: PaintText['anchor'] = 't'
+  anchor: PaintText['anchor'] = 't',
+  clip = false
 ): PaintText {
   const built: PaintParagraph[] = []
   const counters = new Map<number, number>()
@@ -884,7 +1056,7 @@ function paragraphs(
       runs
     })
   }
-  return { anchor, padding, paragraphs: built }
+  return { anchor, padding, clip, paragraphs: built }
 }
 
 function styleSpans(
@@ -931,8 +1103,9 @@ function bodyMetrics(
   element: XmlElement,
   marker: Marker | undefined,
   mode: Mode
-): { anchor: PaintText['anchor']; padding: PaintText['padding']; fontScale: number } {
+): { anchor: PaintText['anchor']; padding: PaintText['padding']; fontScale: number; clip: boolean } {
   let anchor: PaintText['anchor'] = 't'
+  let clip = false
   let left = 91440
   let top = 45720
   let right = 91440
@@ -953,6 +1126,7 @@ function bodyMetrics(
     if (props === undefined) continue
     const value = attribute(props.attrs, 'anchor')
     if (value === 'ctr' || value === 'b' || value === 't') anchor = value
+    if (attribute(props.attrs, 'vertOverflow') === 'clip') clip = true
     const lIns = attribute(props.attrs, 'lIns')
     if (lIns !== undefined) left = readNumber(lIns)
     const tIns = attribute(props.attrs, 'tIns')
@@ -967,7 +1141,7 @@ function bodyMetrics(
       fontScale = scale === undefined ? 1 : readNumber(scale) / 100000
     }
   }
-  return { anchor, padding: { left, top, right, bottom }, fontScale }
+  return { anchor, padding: { left, top, right, bottom }, fontScale, clip }
 }
 
 function prototypes(

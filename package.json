@@ -5,6 +5,29 @@
   "description": "从零实现的浏览器 PPTX 内核：打开演示文稿、编辑文字、新增幻灯片，并覆盖保存当前文件。",
   "type": "module",
   "license": "Apache-2.0",
+  "main": "./index.js",
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "index.js",
+    "client.js",
+    "cordis.patch.yml",
+    "packages/pptx-kernel"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-sidebar-documentpreview"
+      ]
+    }
+  },
   "scripts": {
     "pptx:web": "esbuild packages/pptx-kernel/web/main.ts --bundle --outfile=packages/pptx-kernel/web/editor.js --format=esm --platform=browser",
     "lint": "oxlint .",

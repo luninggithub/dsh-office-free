@@ -32,6 +32,14 @@ import { readZip, writeZip } from './zip.ts'
 const textDecoder = new TextDecoder()
 const textEncoder = new TextEncoder()
 
+const IMAGE_TYPES: Readonly<Record<string, string>> = {
+  png: 'image/png',
+  jpg: 'image/jpeg',
+  jpeg: 'image/jpeg',
+  gif: 'image/gif',
+  webp: 'image/webp'
+}
+
 export interface SlideSize {
   readonly width: number
   readonly height: number
@@ -56,6 +64,15 @@ export interface SlidePage {
   readonly shapes: readonly SlideShape[]
 }
 
+/** Package state captured before an edit so the page can undo it. */
+export interface PptxCheckpoint {
+  readonly edited: ReadonlyMap<string, string>
+  readonly order: readonly string[]
+  readonly dirty: boolean
+  readonly present: ReadonlySet<string>
+  readonly added: ReadonlyMap<string, Uint8Array>
+}
+
 interface SlideEntry {
   readonly relationId: string
   readonly tag: string
@@ -73,6 +90,7 @@ export const EMU_PER_PIXEL = 914400 / 96
 
 export class PptxDocument {
   private readonly original: Uint8Array
+  private readonly initial: Map<string, Uint8Array>
   private readonly parts: Map<string, Uint8Array>
   private order: string[]
   private readonly edited = new Map<string, string>()
@@ -85,6 +103,7 @@ export class PptxDocument {
     order: readonly string[]
   ) {
     this.original = original
+    this.initial = new Map(parts)
     this.parts = parts
     this.order = [...order]
   }
@@ -143,6 +162,89 @@ export class PptxDocument {
     if (edited !== undefined) return textEncoder.encode(edited)
     const bytes = this.parts.get(name)
     return bytes === undefined ? undefined : bytes.slice()
+  }
+
+  /** Copy the editable package state. Added image bytes are copied; original parts are not. */
+  capture(): PptxCheckpoint {
+    const added = new Map<string, Uint8Array>()
+    for (const [name, bytes] of this.parts) {
+      if (!this.initial.has(name)) added.set(name, bytes.slice())
+    }
+    return {
+      edited: new Map(this.edited),
+      order: [...this.order],
+      dirty: this.dirty,
+      present: new Set(this.parts.keys()),
+      added
+    }
+  }
+
+  /** Return the package to a previous `capture()`. */
+  restore(checkpoint: PptxCheckpoint): void {
+    this.edited.clear()
+    for (const [name, xml] of checkpoint.edited) this.edited.set(name, xml)
+    for (const name of [...this.parts.keys()]) {
+      if (!checkpoint.present.has(name)) this.parts.delete(name)
+    }
+    for (const name of checkpoint.present) {
+      const added = checkpoint.added.get(name)
+      if (added !== undefined) {
+        this.parts.set(name, added.slice())
+        continue
+      }
+      if (!this.parts.has(name)) {
+        const original = this.initial.get(name)
+        if (original !== undefined) this.parts.set(name, original)
+      }
+    }
+    this.order = [...checkpoint.order]
+    this.dirty = checkpoint.dirty
+    this.scenes.clear()
+  }
+
+  /**
+   * Place a local image on a slide. `frame` is the axis-aligned box in slide EMU.
+   * Returns the new picture id.
+   */
+  insertPicture(
+    slideIndex: number,
+    image: { readonly bytes: Uint8Array; readonly extension: string },
+    frame: {
+      readonly x: number
+      readonly y: number
+      readonly width: number
+      readonly height: number
+    }
+  ): string {
+    const extension = image.extension.toLowerCase()
+    const contentType = IMAGE_TYPES[extension]
+    if (contentType === undefined) throw new Error(`pptx: unsupported image .${extension}`)
+    if (image.bytes.byteLength === 0) throw new Error('pptx: image is empty')
+    const slide = this.slides()[slideIndex]
+    if (slide === undefined) throw new Error(`pptx: slide ${slideIndex} does not exist`)
+    const path = nextMediaPath(new Set([...this.order, ...this.parts.keys()]), extension)
+    this.rememberBytes(path, image.bytes)
+    const relationId = this.ensureRelationship(
+      slide.partName,
+      'http://schemas.openxmlformats.org/officeDocument/2006/relationships/image',
+      `../media/${path.slice('ppt/media/'.length)}`
+    )
+    const types = this.optionalText('[Content_Types].xml')
+    if (types !== undefined) {
+      this.remember('[Content_Types].xml', ensureImageDefault(types, extension, contentType))
+    }
+    const xml = this.text(slide.partName)
+    const tree = findDescendant(xml, 'spTree')
+    if (tree === undefined) throw new Error('pptx: slide has no shape tree')
+    const id = String(nextShapeId(xml))
+    const picture = pictureXml(id, relationId, frame)
+    this.edited.set(
+      slide.partName,
+      xml.slice(0, tree.closeStart) + picture + xml.slice(tree.closeStart)
+    )
+    this.dirty = true
+    this.scenes.delete(slideIndex)
+    return id
   }
 
   /**
@@ -252,6 +354,7 @@ export class PptxDocument {
         copy = copy.replace(/(embed=")[^"]*(")/, `$1${id}$2`)
       }
     }
+    copy = this.copyChartRelation(source.partName, target.partName, copy)
     const tree = findDescendant(this.text(target.partName), 'spTree')
     if (tree === undefined) throw new Error('pptx: slide has no shape tree')
     const next = this.text(target.partName)
@@ -386,6 +489,12 @@ export class PptxDocument {
     if (!this.order.includes(name)) this.order.push(name)
   }
 
+  private rememberBytes(name: string, bytes: Uint8Array): void {
+    this.edited.delete(name)
+    this.parts.set(name, bytes.slice())
+    if (!this.order.includes(name)) this.order.push(name)
+  }
+
   private forget(name: string): void {
     this.edited.delete(name)
     this.parts.delete(name)
@@ -405,6 +514,20 @@ export class PptxDocument {
     this.edited.set(slide.partName, change(xml, located))
     this.dirty = true
     this.scenes.delete(slideIndex)
+  }
+
+  /** Keep a copied chart frame pointing at the same chart part on the destination slide. */
+  private copyChartRelation(sourcePart: string, targetPart: string, fragment: string): string {
+    const chart = findDescendant(fragment, 'chart')
+    if (chart === undefined) return fragment
+    const relationId = attribute(chart.attrs, 'id', true)
+    if (relationId === undefined) return fragment
+    const relation = this.slideRelations(sourcePart).get(relationId)
+    if (relation === undefined) return fragment
+    const id = this.ensureRelationship(targetPart, relation.type, relation.target)
+    const attrs = chart.attrs.replace(/([A-Za-z_][\w.-]*:id=")[^"]*(")/, `$1${id}$2`)
+    const body = fragment.slice(chart.start, chart.end).replace(chart.attrs, attrs)
+    return fragment.slice(0, chart.start) + body + fragment.slice(chart.end)
   }
 
   private ensureRelationship(partName: string, type: string, target: string): string {
@@ -541,7 +664,7 @@ function collectShapes(
       )
       continue
     }
-    if (element.name !== 'sp' && element.name !== 'pic') continue
+    if (element.name !== 'sp' && element.name !== 'pic' && element.name !== 'graphicFrame') continue
     const id = readShapeId(xml, element)
     if (id === undefined) continue
     const xfrm = shapeXfrm(xml, element) ?? EMPTY_XFRM
@@ -587,7 +710,7 @@ function findShapeIn(
       continue
     }
     if (
-      (element.name === 'sp' || element.name === 'pic') &&
+      (element.name === 'sp' || element.name === 'pic' || element.name === 'graphicFrame') &&
       readShapeId(xml, element) === shapeId
     ) {
       return element
@@ -596,9 +719,11 @@ function findShapeIn(
   return undefined
 }
 
+const SHAPE_MARKERS = new Set(['nvSpPr', 'nvPicPr', 'nvCxnSpPr', 'nvGraphicFramePr'])
+
 function readShapeId(xml: string, element: XmlElement): string | undefined {
   const properties = childElements(xml, element.openEnd, element.closeStart)
-  const holder = properties.find((item) => item.name === 'nvSpPr' || item.name === 'nvPicPr')
+  const holder = properties.find((item) => SHAPE_MARKERS.has(item.name))
   const range = holder ?? element
   const marker = findDescendant(xml, 'cNvPr', range.openEnd, range.closeStart)
   return marker === undefined ? undefined : attribute(marker.attrs, 'id')
@@ -606,7 +731,7 @@ function readShapeId(xml: string, element: XmlElement): string | undefined {
 
 function shapeName(xml: string, element: XmlElement): string {
   const properties = childElements(xml, element.openEnd, element.closeStart)
-  const holder = properties.find((item) => item.name === 'nvSpPr' || item.name === 'nvPicPr')
+  const holder = properties.find((item) => SHAPE_MARKERS.has(item.name))
   const range = holder ?? element
   const marker = findDescendant(xml, 'cNvPr', range.openEnd, range.closeStart)
   return marker === undefined ? '' : (attribute(marker.attrs, 'name') ?? '')
@@ -804,7 +929,7 @@ function walkShapes(
       continue
     }
     if (
-      (element.name === 'sp' || element.name === 'pic') &&
+      (element.name === 'sp' || element.name === 'pic' || element.name === 'graphicFrame') &&
       readShapeId(xml, element) === shapeId
     ) {
       return { element, parent, local: shapeXfrm(xml, element) ?? EMPTY_XFRM }
@@ -1003,6 +1128,33 @@ function insertRelationship(
   const close = xml.lastIndexOf('</Relationships>')
   if (close < 0) throw new Error('pptx: presentation relationships are missing')
   return xml.slice(0, close) + tag + xml.slice(close)
+}
+
+function nextMediaPath(names: ReadonlySet<string>, extension: string): string {
+  let max = 0
+  for (const name of names) {
+    const match = /^ppt\/media\/image(\d+)\.[^.]+$/.exec(name)
+    if (match?.[1] !== undefined) max = Math.max(max, Number(match[1]))
+  }
+  return `ppt/media/image${max + 1}.${extension}`
+}
+
+function ensureImageDefault(xml: string, extension: string, contentType: string): string {
+  if (xml.includes(`Extension="${extension}"`)) return xml
+  const tag = `<Default Extension="${extension}" ContentType="${contentType}"/>`
+  const close = xml.lastIndexOf('</Types>')
+  if (close < 0) return xml
+  return xml.slice(0, close) + tag + xml.slice(close)
+}
+
+function pictureXml(
+  id: string,
+  relationId: string,
+  frame: { readonly x: number; readonly y: number; readonly width: number; readonly height: number }
+): string {
+  const off = `<a:off x="${Math.round(frame.x)}" y="${Math.round(frame.y)}"/>`
+  const ext = `<a:ext cx="${Math.max(1, Math.round(frame.width))}" cy="${Math.max(1, Math.round(frame.height))}"/>`
+  return `<p:pic><p:nvPicPr><p:cNvPr id="${id}" name="Picture ${id}"/><p:cNvPicPr><a:picLocks noChangeAspect="1"/></p:cNvPicPr><p:nvPr/></p:nvPicPr><p:blipFill><a:blip r:embed="${relationId}"/><a:stretch><a:fillRect/></a:stretch></p:blipFill><p:spPr><a:xfrm>${off}${ext}</a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></p:spPr></p:pic>`
 }
 
 function insertContentType(xml: string, partName: string): string {

@@ -20,6 +20,8 @@ node packages/pptx-kernel/web/server.mjs
 - `format` and `format:check` are repository-wide. For a narrow change, check the touched files with `pnpm exec oxfmt --check <files>`.
 - `pnpm run pptx:web` rebuilds `packages/pptx-kernel/web/editor.js`. Do not hand-edit that bundle. Bump the `editor.js` query in `index.html` when the page must load the new bundle.
 - The preview server serves `packages/pptx-kernel/web` on `127.0.0.1:4173` and accepts `POST /save?name=` only for an existing `.pptx` in that directory.
+- `index.js` is the DSH host entry. `cordis.patch.yml` mounts it as `dsh-univer-office`, and an authenticated session reads the same web directory at `/office/`. That route does not accept `/save`.
+- `client.js` is the browser entry. It claims `.pptx` in the right-hand document preview at extension priority, so a generated deck opens there instead of the built-in Office preview. The pane's existing left-edge drag resizes it. The preview iframe posts the file bytes into the editor with `dsh-office-open`.
 - Run `pnpm run typecheck` for TypeScript changes and `git diff --check` before every handoff. Report the exact commands that completed successfully.
 
 ## 2. Kernel boundaries
@@ -32,8 +34,9 @@ node packages/pptx-kernel/web/server.mjs
 - A new slide is blank, appended at the end, and reuses the current slide's layout.
 - Thumbnail order, copy, and delete rewrite the slide list in the package. The last remaining slide cannot be deleted.
 - Text edits keep existing run formatting. Do not put a whole shape's text into the first run.
-- Picture and text-box moves, picture resize and crop, and shape deletion rewrite that shape in the open package.
-- The preview zoom is an explicit scale from 10% to 400%, default 100%. The wheel changes that scale only while the slide page itself is selected; otherwise it scrolls the viewport.
+- Picture and text-box moves, picture resize and crop, and shape deletion rewrite that shape in the open package. Text may draw outside its box unless the text body sets vertical overflow to clip, and that overflow still selects and edits with the shape. Doughnut and pie charts are painted with their title, slice colors, legend, and the chart area's fill, outline, and rounded corners, and can be selected, moved, resized, copied, and deleted. The crop control stays on pictures. Text boxes can be copied. Ctrl+C copies the selection, Ctrl+V pastes it, and Ctrl+Z undoes the last edit. A local PNG, JPEG, GIF, or WebP can be inserted and then edited as a picture.
+- The preview zoom is an explicit scale from 10% to 400%, default 100%. The plus and minus buttons change it by one percent. The wheel changes that scale only while the slide page itself is selected; otherwise it scrolls the viewport.
+- At any pane width, the horizontal scrollbar reaches both edges of the slide. The thumbnail list and the slide share a drag handle that sets both widths. A selected picture's crop button has its top-left corner on that picture's top-right corner.
 
 ## 3. TypeScript
 

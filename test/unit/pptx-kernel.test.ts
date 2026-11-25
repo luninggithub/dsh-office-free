@@ -178,6 +178,33 @@ describe('pptx kernel', () => {
     expect(saved.slides()[1]?.shapes.find((shape) => shape.id === copied)?.kind).toBe('picture')
   })
 
+  it('copies a text box, inserts a local picture, and restores either edit', async () => {
+    const opened = await openPptx(await sample())
+    const copied = opened.duplicateShape(0, '2', 0, 15, 0)
+    expect(opened.slides()[0]?.shapes.find((shape) => shape.id === copied)?.text).toBe('Hello & more')
+    const beforeText = opened.capture()
+    opened.setShapeText(0, '2', 'Changed')
+    const beforePicture = opened.capture()
+    const id = opened.insertPicture(
+      0,
+      { bytes: PNG, extension: 'png' },
+      { x: 10, y: 20, width: 30, height: 40 }
+    )
+    const picture = opened.slides()[0]?.shapes.find((shape) => shape.id === id)
+    expect(picture).toMatchObject({ kind: 'picture', x: 10, y: 20, width: 30, height: 40 })
+    if (picture?.kind !== 'picture') throw new Error('inserted shape is not a picture')
+    const saved = await openPptx(await opened.save())
+    expect(saved.part(picture.imagePath)).toEqual(PNG)
+    opened.restore(beforePicture)
+    expect(opened.slides()[0]?.shapes.find((shape) => shape.id === '2')?.text).toBe('Changed')
+    expect(opened.slides()[0]?.shapes.find((shape) => shape.id === id)).toBeUndefined()
+    opened.restore(beforeText)
+    expect(opened.slides()[0]?.shapes.find((shape) => shape.id === '2')?.text).toBe('Hello & more')
+    expect(() =>
+      opened.insertPicture(0, { bytes: PNG, extension: 'bmp' }, { x: 0, y: 0, width: 1, height: 1 })
+    ).toThrow(/unsupported/)
+  })
+
   it('rejects a picture edit and a missing shape', async () => {
     const opened = await openPptx(await sample())
     expect(() => opened.setShapeText(0, '3', 'nope')).toThrow(/no text/)
@@ -273,6 +300,47 @@ describe('pptx kernel', () => {
     expect(scene.shapes.find((shape) => shape.plain === '1')?.text?.paragraphs[0]?.align).toBe('r')
   })
 
+  it('keeps overflowing caption text and paints a doughnut chart', async () => {
+    const opened = await openPptx(await chartDeck())
+    const text = opened.scene(0).shapes.find((shape) => shape.id === '2')
+    expect(text?.plain).toContain('同比增长约 40%')
+    expect(text?.text?.clip).toBe(false)
+    expect(opened.scene(0).shapes.find((shape) => shape.id === '3')?.text?.clip).toBe(true)
+    const chart = opened.scene(0).shapes.find((shape) => shape.id === '4')
+    expect(chart?.selectable).toBe(true)
+    expect(chart).toMatchObject({
+      geometry: 'round',
+      fill: { kind: 'solid', color: '#e8f1fa' },
+      line: { color: '#d6e5f2', width: 9525, dash: 'solid' }
+    })
+    expect(chart?.corner).toBeGreaterThan(0)
+    expect(chart?.chart).toEqual({
+      kind: 'doughnut',
+      title: '2025 年中国 AI 芯片市场份额',
+      hole: 0.6,
+      start: 0,
+      legend: true,
+      points: [
+        { label: '英伟达 55%', value: 55, color: '#0b2545' },
+        { label: '华为昇腾 20%', value: 20, color: '#1b7f79' }
+      ]
+    })
+    opened.setShapeFrame(0, '4', { x: 50, y: 60, width: 700, height: 800 })
+    expect(opened.scene(0).shapes.find((shape) => shape.id === '4')).toMatchObject({
+      x: 50,
+      y: 60,
+      width: 700,
+      height: 800
+    })
+    const copied = opened.duplicateShape(0, '4', 0, 20, 0)
+    expect(opened.scene(0).shapes.find((shape) => shape.id === copied)?.chart?.title).toBe(
+      '2025 年中国 AI 芯片市场份额'
+    )
+    opened.deleteShape(0, '4')
+    expect(opened.scene(0).shapes.find((shape) => shape.id === '4')).toBeUndefined()
+    expect(opened.scene(0).shapes.find((shape) => shape.id === copied)?.chart?.kind).toBe('doughnut')
+  })
+
   it('reads a deflated ZIP entry', async () => {
     const payload = new TextEncoder().encode('hello deflate')
     const archive = await writeZip([
@@ -283,6 +351,92 @@ describe('pptx kernel', () => {
     expect(deflateRawSync(payload).byteLength).toBeGreaterThan(0)
   })
 })
+
+function chartDeck(): Promise<Uint8Array> {
+  const files: Array<[string, string]> = [
+    ['[Content_Types].xml', contentTypes()],
+    ['_rels/.rels', rootRels()],
+    ['ppt/presentation.xml', chartPresentation()],
+    ['ppt/_rels/presentation.xml.rels', chartPresentationRels()],
+    ['ppt/slides/slide1.xml', chartSlide()],
+    ['ppt/slides/_rels/slide1.xml.rels', chartSlideRels()],
+    ['ppt/charts/chart1.xml', doughnutChart()]
+  ]
+  return writeZip(files.map(([name, data]) => ({ name, data: new TextEncoder().encode(data) })))
+}
+
+function chartPresentation(): string {
+  return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<p:presentation xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main">
+<p:sldIdLst><p:sldId id="256" r:id="rId2"/></p:sldIdLst>
+<p:sldSz cx="12192000" cy="6858000"/>
+</p:presentation>`
+}
+
+function chartPresentationRels(): string {
+  return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+<Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide" Target="slides/slide1.xml"/>
+</Relationships>`
+}
+
+function chartSlideRels(): string {
+  return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+<Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/chart" Target="../charts/chart1.xml"/>
+</Relationships>`
+}
+
+function chartSlide(): string {
+  return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<p:sld xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main">
+<p:cSld><p:spTree>
+<p:nvGrpSpPr><p:cNvPr id="1" name=""/></p:nvGrpSpPr>
+<p:grpSpPr/>
+<p:sp>
+<p:nvSpPr><p:cNvPr id="2" name="Caption"/></p:nvSpPr>
+<p:spPr><a:xfrm><a:off x="100" y="200"/><a:ext cx="300" cy="80"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></p:spPr>
+<p:txBody><a:bodyPr wrap="square" anchor="t"/><a:lstStyle/>
+<a:p><a:r><a:rPr sz="3000"/><a:t>1.2万亿元</a:t></a:r></a:p>
+<a:p><a:r><a:rPr sz="900"/><a:t>同比增长约 40%</a:t></a:r></a:p>
+</p:txBody>
+</p:sp>
+<p:sp>
+<p:nvSpPr><p:cNvPr id="3" name="Clipped"/></p:nvSpPr>
+<p:spPr><a:xfrm><a:off x="500" y="200"/><a:ext cx="300" cy="80"/></a:xfrm></p:spPr>
+<p:txBody><a:bodyPr vertOverflow="clip"/><a:lstStyle/><a:p><a:r><a:t>裁剪</a:t></a:r></a:p></p:txBody>
+</p:sp>
+<p:graphicFrame>
+<p:nvGraphicFramePr><p:cNvPr id="4" name="Chart 18"/><p:cNvGraphicFramePr/><p:nvPr/></p:nvGraphicFramePr>
+<p:xfrm><a:off x="1000" y="300"/><a:ext cx="4000" cy="3000"/></p:xfrm>
+<a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/chart"><c:chart r:id="rId2"/></a:graphicData></a:graphic>
+</p:graphicFrame>
+</p:spTree></p:cSld>
+</p:sld>`
+}
+
+function doughnutChart(): string {
+  return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<c:chartSpace xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+<c:roundedCorners val="1"/>
+<c:chart>
+<c:title><c:tx><c:rich><a:bodyPr/><a:lstStyle/><a:p><a:r><a:rPr sz="1200"/><a:t>2025 年中国 AI 芯片市场份额</a:t></a:r></a:p></c:rich></c:tx></c:title>
+<c:plotArea><c:doughnutChart>
+<c:ser>
+<c:idx val="0"/>
+<c:dPt><c:idx val="0"/><c:spPr><a:solidFill><a:srgbClr val="0B2545"/></a:solidFill></c:spPr></c:dPt>
+<c:dPt><c:idx val="1"/><c:spPr><a:solidFill><a:srgbClr val="1B7F79"/></a:solidFill></c:spPr></c:dPt>
+<c:cat><c:strRef><c:strCache><c:pt idx="0"><c:v>英伟达 55%</c:v></c:pt><c:pt idx="1"><c:v>华为昇腾 20%</c:v></c:pt></c:strCache></c:strRef></c:cat>
+<c:val><c:numRef><c:numCache><c:pt idx="0"><c:v>55</c:v></c:pt><c:pt idx="1"><c:v>20</c:v></c:pt></c:numCache></c:numRef></c:val>
+</c:ser>
+<c:holeSize val="60"/>
+<c:firstSliceAng val="0"/>
+</c:doughnutChart></c:plotArea>
+<c:legend><c:legendPos val="b"/></c:legend>
+</c:chart>
+<c:spPr><a:solidFill><a:srgbClr val="E8F1FA"/></a:solidFill><a:ln w="9525"><a:solidFill><a:srgbClr val="D6E5F2"/></a:solidFill></a:ln></c:spPr>
+</c:chartSpace>`
+}
 
 async function sample(): Promise<Uint8Array> {
   const files: Array<[string, string | Uint8Array]> = [
